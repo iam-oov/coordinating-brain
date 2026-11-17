@@ -368,6 +368,22 @@ export function addBuild(db: Db, b: Omit<Build, 'id' | 'createdAt'>, now = Date.
   return { ...b, id: Number(res.lastInsertRowid), createdAt: now };
 }
 
+export function importBuild(
+  db: Db,
+  b: Omit<Build, 'id' | 'createdAt' | 'requestId'>,
+  now = Date.now(),
+): Build {
+  return tx(db, () => {
+    const res = db
+      .prepare(
+        `INSERT INTO requests (app_slug, user_id, kind, text, status, reason, created_at, decided_at, started_at, finished_at)
+         VALUES (?, NULL, 'change', ?, 'built', ?, ?, ?, ?, ?)`,
+      )
+      .run(b.appSlug, `Imported build v${b.versionCode}`, 'Built outside the worker.', now, now, now, now);
+    return addBuild(db, { ...b, requestId: Number(res.lastInsertRowid) }, now);
+  });
+}
+
 export function latestBuild(db: Db, appSlug: string): Build | null {
   const r = db.prepare('SELECT * FROM builds WHERE app_slug = ? ORDER BY id DESC LIMIT 1').get(appSlug) as
     | BuildRow

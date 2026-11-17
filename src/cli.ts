@@ -9,24 +9,37 @@
  *   npm run cli -- user:disable osvaldo | user:enable osvaldo
  *   npm run cli -- user:list
  *   npm run cli -- app:list
+ *   npm run cli -- build:import jeep-obd2 app.apk 1 e8a28b3   publish an APK built outside the worker
  */
+import fs from 'node:fs';
+
 import { JEEP_OBD2 } from './apps.ts';
 import { loadConfig } from './config.ts';
 import { openDb } from './db.ts';
 import {
   createUser,
+  getApp,
   grantApps,
+  importBuild,
   listApps,
   listUsers,
+  maxVersionCode,
   resetUserCode,
   revokeApps,
   setUserEnabled,
   upsertApp,
   userId,
 } from './store.ts';
+import { storeApk } from './worker/pipeline.ts';
 
 const [command, ...args] = process.argv.slice(2);
-const db = openDb(loadConfig().dbPath);
+const config = loadConfig();
+const db = openDb(config.dbPath);
+
+function fail(message: string): never {
+  console.error(message);
+  process.exit(2);
+}
 const list = (s: string | undefined) => (s ?? '').split(',').map((x) => x.trim()).filter(Boolean);
 
 function need(value: string | undefined, what: string): string {
@@ -69,8 +82,26 @@ switch (command) {
   case 'user:list':
     for (const u of listUsers(db)) console.log(`${u.name}\t${u.enabled ? 'enabled' : 'disabled'}\t${u.apps.join(',')}`);
     break;
+  case 'build:import': {
+    const slug = need(args[0], 'app slug');
+    const apk = need(args[1], 'APK path');
+    const versionCode = Number(need(args[2], 'version code'));
+    const sha = need(args[3], 'commit SHA');
+    if (!getApp(db, slug)) fail(`Unknown app ${slug}.`);
+    if (!fs.existsSync(apk)) fail(`APK not found: ${apk}`);
+    if (!Number.isInteger(versionCode) || versionCode <= maxVersionCode(db, slug)) {
+      fail(`Version code must be an integer above ${maxVersionCode(db, slug)}.`);
+    }
+    if (!/^[0-9a-f]{7,40}$/.test(sha)) fail('Commit SHA must be 7-40 hex characters.');
+    const apkFile = storeApk(config.apksDir, slug, apk, versionCode, sha);
+    importBuild(db, { appSlug: slug, versionCode, apkFile, commitSha: sha });
+    console.log(`Build ${apkFile} imported for ${slug}.`);
+    break;
+  }
   default:
-    console.error('Commands: app:jeep, app:list, user:add, user:grant, user:revoke, user:reset-code, user:enable, user:disable, user:list');
+    console.error(
+      'Commands: app:jeep, app:list, user:add, user:grant, user:revoke, user:reset-code, user:enable, user:disable, user:list, build:import',
+    );
     process.exit(2);
 }
 db.close();

@@ -215,11 +215,15 @@ async function commitAndPush(
 
 /** Copies the APK into the published folder; returns its file name. */
 function publishApk(config: Config, app: App, dir: string, versionCode: number, sha: string): string {
-  const destDir = path.join(config.apksDir, app.slug);
+  return storeApk(config.apksDir, app.slug, path.join(dir, app.apkPath), versionCode, sha);
+}
+
+export function storeApk(apksDir: string, slug: string, source: string, versionCode: number, sha: string): string {
+  const destDir = path.join(apksDir, slug);
   fs.mkdirSync(destDir, { recursive: true });
-  const name = `${app.slug}-v${versionCode}-${sha.slice(0, 7)}.apk`;
+  const name = `${slug}-v${versionCode}-${sha.slice(0, 7)}.apk`;
   const tmp = path.join(destDir, `.${name}.tmp`);
-  fs.copyFileSync(path.join(dir, app.apkPath), tmp);
+  fs.copyFileSync(source, tmp);
   fs.renameSync(tmp, path.join(destDir, name));
   return name;
 }
