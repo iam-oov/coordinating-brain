@@ -1,0 +1,24 @@
+{
+  "name": "coordinating-brain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend that receives improvement requests for apps, implements approved ones with Claude Code, and publishes the built APK.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "cli": "node src/cli.ts",
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "fastify": "^5.12.8"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}

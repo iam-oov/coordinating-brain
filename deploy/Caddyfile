@@ -1,0 +1,6 @@
+# TLS certificate and reverse proxy for the brain. Needs a DNS A/AAAA record
+# for cerebro.valdoh.com pointing at the server, and ports 80/443 open.
+cerebro.valdoh.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8787
+}

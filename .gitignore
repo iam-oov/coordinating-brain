@@ -1,0 +1,6 @@
+node_modules/
+# Runtime data: database, published APKs, work directories, local env.
+data/
+.env
+*.db
+*.db-*
