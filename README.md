@@ -65,14 +65,14 @@ Other CLI commands: `user:grant`, `user:revoke`, `user:reset-code`, `user:enable
 
 ## Deploy (Linux server)
 
-1. Create an unprivileged user `brain` and clone this repo to `/opt/coordinating-brain`; `npm ci --omit=dev`.
-2. Install, for the `brain` user: Node 24+, git, JDK 17, the Flutter SDK, the Android SDK (`platforms`, `build-tools`, accepted licenses) and Claude Code.
-3. Give the worker push access to each app repo: a GitHub **deploy key with write access** in `~brain/.ssh`, and `github.com` in `known_hosts`.
-4. Copy the signing key the app is already installed with. jeep-obd2's release build is signed with the debug keystore, so copy `~/.android/debug.keystore` from the machine that built the installed APK to `~brain/.android/debug.keystore`. Otherwise Android refuses to update the app and asks to uninstall it, which loses its data.
-5. Create `/opt/coordinating-brain/.env` from `.env.example`: `ADMIN_PASSWORD`, `ANTHROPIC_API_KEY` (Claude Code in `--bare` mode only accepts an API key), `PUBLIC_URL=https://cerebro.valdoh.com`, `TRUST_PROXY=1`.
-6. Register apps and users with the CLI, as the `brain` user.
+1. Create an unprivileged user `coordinating-brain` and clone this repo to `/home/coordinating-brain/coordinating-brain`; `npm ci --omit=dev`.
+2. Install, for the `coordinating-brain` user: Node 26.13.1, git, JDK 17, the Flutter SDK, the Android SDK (`platforms`, `build-tools`, accepted licenses) and Claude Code.
+3. Give the worker push access to each app repo: a GitHub **deploy key with write access** in `~coordinating-brain/.ssh`, and `github.com` in `known_hosts`.
+4. Copy the signing key the app is already installed with. jeep-obd2's release build is signed with the debug keystore, so copy `~/.android/debug.keystore` from the machine that built the installed APK to `~coordinating-brain/.android/debug.keystore`. Otherwise Android refuses to update the app and asks to uninstall it, which loses its data.
+5. Create `/home/coordinating-brain/coordinating-brain/.env` from `.env.example`: `ADMIN_PASSWORD`, `ANTHROPIC_API_KEY` (Claude Code in `--bare` mode only accepts an API key), `PUBLIC_URL=https://cerebro.valdoh.com`, `TRUST_PROXY=1`.
+6. Register apps and users with the CLI, as the `coordinating-brain` user.
 7. Install `deploy/coordinating-brain.service` in `/etc/systemd/system/` and enable it.
-8. Point `cerebro.valdoh.com` at the server and use `deploy/Caddyfile` with Caddy for TLS.
+8. In the Cloudflare Tunnel (Zero Trust dashboard), add the public hostname `cerebro.valdoh.com → http://localhost:8791`. The tunnel terminates TLS; no reverse proxy or open ports are needed.
 
 Set a monthly spend limit on the Anthropic API key. `CLAUDE_MAX_BUDGET_USD` caps each Claude Code run (default 3).
 

@@ -33,10 +33,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const dataDir = path.resolve(env.DATA_DIR ?? './data');
   const admin = env.ADMIN_PASSWORD ?? '';
   return {
-    port: Number(env.PORT ?? 8787),
+    port: Number(env.PORT ?? 8791),
     host: env.HOST ?? '127.0.0.1',
     trustProxy: env.TRUST_PROXY === '1',
-    publicUrl: (env.PUBLIC_URL ?? 'http://127.0.0.1:8787').replace(/\/+$/, ''),
+    publicUrl: (env.PUBLIC_URL ?? 'http://127.0.0.1:8791').replace(/\/+$/, ''),
     dataDir,
     dbPath: path.join(dataDir, 'brain.db'),
     apksDir: path.join(dataDir, 'apks'),

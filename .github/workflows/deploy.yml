@@ -1,0 +1,69 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+
+    steps:
+      - name: Install cloudflared
+        run: |
+          curl -fsSL -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          cloudflared --version
+
+      - name: Configure SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_server
+          chmod 600 ~/.ssh/id_server
+
+      - name: Deploy through the tunnel
+        env:
+          TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          ssh -i ~/.ssh/id_server \
+            -o StrictHostKeyChecking=accept-new \
+            -o "ProxyCommand=cloudflared access ssh --hostname %h" \
+            "${{ secrets.SERVER_SSH_USER }}@pi.valdoh.com" "EXPECTED_SHA=$EXPECTED_SHA bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/coordinating-brain
+          git fetch origin main
+          git reset --hard "$EXPECTED_SHA"
+          npm ci --omit=dev
+          sudo systemctl restart coordinating-brain
+
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/health || true)
+            [ "$CODE" = "200" ] && break
+            sleep 5
+          done
+          if [ "$CODE" != "200" ]; then
+            echo "DEPLOY FAILED: /health returned $CODE"
+            journalctl -u coordinating-brain -n 30 --no-pager
+            exit 1
+          fi
+
+          DEPLOYED_SHA=$(git rev-parse HEAD)
+          if [ "$DEPLOYED_SHA" != "$EXPECTED_SHA" ]; then
+            echo "DEPLOY FAILED: expected $EXPECTED_SHA, deployed $DEPLOYED_SHA"
+            exit 1
+          fi
+          echo "Deploy verified: coordinating-brain $DEPLOYED_SHA running"
+          REMOTE

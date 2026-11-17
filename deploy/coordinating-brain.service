@@ -6,14 +6,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=brain
-Group=brain
-WorkingDirectory=/opt/coordinating-brain
-EnvironmentFile=/opt/coordinating-brain/.env
-# Flutter, the Android SDK and Claude Code must be on the PATH of the brain user.
-Environment=PATH=/home/brain/flutter/bin:/home/brain/android-sdk/cmdline-tools/latest/bin:/home/brain/.local/bin:/usr/local/bin:/usr/bin:/bin
-Environment=ANDROID_HOME=/home/brain/android-sdk
-ExecStart=/usr/bin/env node src/main.ts
+User=coordinating-brain
+Group=coordinating-brain
+WorkingDirectory=/home/coordinating-brain/coordinating-brain
+EnvironmentFile=/home/coordinating-brain/coordinating-brain/.env
+Environment=PATH=/home/coordinating-brain/flutter/bin:/home/coordinating-brain/android-sdk/cmdline-tools/latest/bin:/home/coordinating-brain/android-sdk/platform-tools:/home/coordinating-brain/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=ANDROID_HOME=/home/coordinating-brain/android-sdk
+ExecStart=/usr/local/bin/node src/main.ts
 Restart=on-failure
 RestartSec=5
 # A build can take several minutes; a killed request is queued again on start.
