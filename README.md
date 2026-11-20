@@ -11,8 +11,8 @@ Inspired by [midudev/tuweb.dev](https://github.com/midudev/tuweb.dev), taken fro
 ```
  app "Buzón" / portal        admin (/admin)            worker                         GitHub + portal
 ┌──────────────────┐     ┌──────────────────┐     ┌───────────────────────────┐     ┌──────────────────┐
-│ user enters their│     │ owner approves   │     │ Claude Code edits files   │     │ commit pushed to │
-│ 4-digit code and │ ──▶ │ or rejects each  │ ──▶ │ diff gate · tests · build │ ──▶ │ main · APK at    │
+│ user signs in    │     │ owner approves   │     │ Claude Code edits files   │     │ commit pushed to │
+│ with Google and  │ ──▶ │ or rejects each  │ ──▶ │ diff gate · tests · build │ ──▶ │ main · APK at    │
 │ sends a request  │     │ request          │     │ up to 3 attempts          │     │ /apks/<app>/...  │
 └──────────────────┘     └──────────────────┘     └───────────────────────────┘     └──────────────────┘
 ```
@@ -30,20 +30,20 @@ Every step is logged on the request, visible in `/admin`.
 
 ## Access
 
-- **Users** log in with a 4-digit code. Codes are stored as scrypt hashes. After 5 failed attempts an IP is blocked for 15 minutes, even if the next code is right.
-- Each code sees only the apps granted to it (`user_apps`), in the portal and the API.
-- **Admin** logs in at `/admin` with `ADMIN_PASSWORD` (16+ characters; the panel is off otherwise).
+- **Users** sign in with Google. The app sends a Google ID token to `/api/login/google`; the web portal uses the authorization code flow with PKCE, state and nonce. ID tokens are verified against Google's keys (issuer, audience = the web client ID, verified email). Sign-up is open: a new account gets the app it signed in from. After 5 invalid tokens an IP is blocked for 15 minutes.
+- Each user sees only the apps granted to them (`user_apps`), in the portal and the API.
+- **Admin** is any account whose email is in `ADMIN_EMAILS`, checked on every request.
 
 ## Endpoints
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/api/login` | code | Session token and the apps the code may use |
+| POST | `/api/login/google` | Google ID token | Session token and the user's apps (`{idToken, app}`) |
 | GET | `/api/apps` | bearer | Apps and their latest APK |
 | GET | `/api/apps/:slug/requests` | bearer | The user's requests for an app |
 | POST | `/api/apps/:slug/requests` | bearer | New request `{ "text": "…" }` |
 | POST | `/api/apps/:slug/download-link` | bearer | One-time URL (10 min) to download the latest APK in a browser |
-| GET | `/apks` | cookie | Portal: code form, then apps, latest APK, requests |
+| GET | `/apks` | cookie | Portal: Google sign-in, then apps, latest APK, requests |
 | GET | `/apks/:slug/latest.apk` | cookie or `?dl=` | Always the latest APK of the app |
 | GET | `/admin` | admin cookie | Approve/reject, queue, APKs, history, revert |
 | GET | `/health` | — | Liveness |
@@ -55,13 +55,12 @@ Requires Node 24+ (uses the built-in `node:sqlite` and TypeScript type stripping
 ```
 npm install
 npm test
-cp .env.example .env            # set ADMIN_PASSWORD; WORKER_ENABLED=0 to skip Claude runs
+cp .env.example .env            # set the GOOGLE_* ids and ADMIN_EMAILS; WORKER_ENABLED=0 to skip Claude runs
 npm run cli -- app:jeep         # register jeep-obd2
-npm run cli -- user:add osvaldo jeep-obd2   # prints the user's 4-digit code once
 node --env-file=.env src/main.ts
 ```
 
-Other CLI commands: `user:grant`, `user:revoke`, `user:reset-code`, `user:enable`, `user:disable`, `user:list`, `app:list`.
+Other CLI commands: `user:link`, `user:grant`, `user:revoke`, `user:enable`, `user:disable`, `user:list`, `app:list`, `build:import`.
 
 ## Deploy (Linux server)
 
@@ -69,8 +68,8 @@ Other CLI commands: `user:grant`, `user:revoke`, `user:reset-code`, `user:enable
 2. Install, for the `coordinating-brain` user: Node 26.13.1, git, JDK 17, the Flutter SDK, the Android SDK (`platforms`, `build-tools`, accepted licenses) and Claude Code.
 3. Give the worker push access to each app repo: a GitHub **deploy key with write access** in `~coordinating-brain/.ssh`, and `github.com` in `known_hosts`.
 4. Copy the signing key the app is already installed with. jeep-obd2's release build is signed with the debug keystore, so copy `~/.android/debug.keystore` from the machine that built the installed APK to `~coordinating-brain/.android/debug.keystore`. Otherwise Android refuses to update the app and asks to uninstall it, which loses its data.
-5. Create `/home/coordinating-brain/coordinating-brain/.env` from `.env.example`: `ADMIN_PASSWORD`, `ANTHROPIC_API_KEY` (Claude Code in `--bare` mode only accepts an API key), `PUBLIC_URL=https://cerebro.valdoh.com`, `TRUST_PROXY=1`.
-6. Register apps and users with the CLI, as the `coordinating-brain` user.
+5. Create `/home/coordinating-brain/coordinating-brain/.env` from `.env.example`: `GOOGLE_WEB_CLIENT_ID`, `GOOGLE_WEB_CLIENT_SECRET`, `ADMIN_EMAILS`, `ANTHROPIC_API_KEY` (Claude Code in `--bare` mode only accepts an API key), `PUBLIC_URL=https://cerebro.valdoh.com`, `TRUST_PROXY=1`.
+6. Register apps with the CLI, as the `coordinating-brain` user (`app:jeep`). Users sign up themselves with Google; a user created before Google sign-in is linked with `user:link <name> <email>`.
 7. Install `deploy/coordinating-brain.service` in `/etc/systemd/system/` and enable it.
 8. In the Cloudflare Tunnel (Zero Trust dashboard), add the public hostname `cerebro.valdoh.com → http://localhost:8791`. The tunnel terminates TLS; no reverse proxy or open ports are needed.
 
@@ -79,7 +78,8 @@ Set a monthly spend limit on the Anthropic API key. `CLAUDE_MAX_BUDGET_USD` caps
 ## Layout
 
 - `src/server.ts` — API, portal and admin panel (Fastify).
-- `src/auth.ts` — codes, sessions, lockout, download tokens.
+- `src/auth.ts` — sessions, OAuth state, lockout, download tokens.
+- `src/google.ts` — Google ID token verification and the OAuth code exchange.
 - `src/store.ts`, `src/db.ts` — SQLite schema and queries.
 - `src/worker/` — queue (`worker.ts`), pipeline (`pipeline.ts`), Claude Code runner (`runner.ts`), diff gate (`diffGate.ts`), first-pass moderation (`moderation.ts`).
 - `src/cli.ts` — admin CLI.

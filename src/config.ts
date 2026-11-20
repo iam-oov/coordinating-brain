@@ -17,8 +17,10 @@ export interface Config {
   dbPath: string;
   apksDir: string;
   workDir: string;
-  /** Empty when the admin panel is disabled. */
-  adminPassword: string;
+  google: { webClientId: string; webClientSecret: string };
+  adminEmails: string[];
+  sandbox: 'systemd' | 'none' | '';
+  sandboxDir: string;
   sessionDays: number;
   workerEnabled: boolean;
   workerPollMs: number;
@@ -27,11 +29,23 @@ export interface Config {
   gitAuthorEmail: string;
 }
 
-const MIN_ADMIN_PASSWORD = 16;
+function emailList(value: string | undefined): string[] {
+  return (value ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function sandboxMode(value: string | undefined): Config['sandbox'] {
+  return value === 'systemd' || value === 'none' ? value : '';
+}
+
+export function isAdminEmail(config: Config, email: string | null | undefined): boolean {
+  return !!email && config.adminEmails.includes(email.toLowerCase());
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const dataDir = path.resolve(env.DATA_DIR ?? './data');
-  const admin = env.ADMIN_PASSWORD ?? '';
   return {
     port: Number(env.PORT ?? 8791),
     host: env.HOST ?? '127.0.0.1',
@@ -41,7 +55,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dbPath: path.join(dataDir, 'brain.db'),
     apksDir: path.join(dataDir, 'apks'),
     workDir: path.join(dataDir, 'work'),
-    adminPassword: admin.length >= MIN_ADMIN_PASSWORD ? admin : '',
+    google: { webClientId: env.GOOGLE_WEB_CLIENT_ID ?? '', webClientSecret: env.GOOGLE_WEB_CLIENT_SECRET ?? '' },
+    adminEmails: emailList(env.ADMIN_EMAILS),
+    sandbox: sandboxMode(env.SANDBOX),
+    sandboxDir: env.SANDBOX_DIR ?? '/var/lib/cb-sandbox',
     sessionDays: 30,
     workerEnabled: env.WORKER_ENABLED !== '0',
     workerPollMs: Number(env.WORKER_POLL_SECONDS ?? 15) * 1000,

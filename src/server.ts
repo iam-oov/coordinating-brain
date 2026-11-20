@@ -5,16 +5,23 @@ import Fastify from 'fastify';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import type { Config } from './config.ts';
+import { isAdminEmail } from './config.ts';
 import type { Db } from './db.ts';
 import {
+  clearFailures,
+  consumeOAuthState,
   createDownloadToken,
+  createOAuthState,
   createSession,
   deleteSession,
   getSession,
-  loginAdmin,
-  loginWithCode,
+  pkceChallenge,
+  recordFailure,
+  retryAfterSeconds,
   useDownloadToken,
 } from './auth.ts';
+import type { GoogleAuth, GoogleIdentity } from './google.ts';
+import { authorizeUrl } from './google.ts';
 import type { App, Build, Request } from './store.ts';
 import {
   appsForUser,
@@ -24,24 +31,32 @@ import {
   decideRequest,
   getApp,
   getBuild,
+  getUser,
+  grantApps,
   latestBuild,
   listApps,
   listBuilds,
   listRequests,
+  upsertGoogleUser,
   userCanUseApp,
 } from './store.ts';
 import { STATUS_LABEL, fmtDate, html, page } from './web/html.ts';
 import { MAX_LENGTH, MIN_LENGTH } from './worker/moderation.ts';
 
-const USER_COOKIE = 'cb_session';
-const ADMIN_COOKIE = 'cb_admin';
+const SESSION_COOKIE = 'cb_session';
+const OAUTH_COOKIE = 'cb_oauth';
+const OAUTH_COOKIE_PATH = '/auth/google';
+const LOGIN_NEXT = ['/apks', '/admin'];
 
 export interface ServerDeps {
   config: Config;
   db: Db;
+  google?: GoogleAuth;
   /** Called after the admin approves something, so the worker starts now. */
   wakeWorker?: () => void;
 }
+
+type LoginOutcome = { ok: true; token: string; userId: number; userName: string } | { ok: false; status: number; error: string };
 
 // ------------------------------------------------------------- helpers
 
@@ -91,7 +106,7 @@ function appJson(db: Db, a: App) {
 
 // -------------------------------------------------------------- server
 
-export function buildServer({ config, db, wakeWorker }: ServerDeps): FastifyInstance {
+export function buildServer({ config, db, google, wakeWorker }: ServerDeps): FastifyInstance {
   const app = Fastify({ trustProxy: config.trustProxy, logger: false, bodyLimit: 64 * 1024 });
 
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {
@@ -111,7 +126,7 @@ export function buildServer({ config, db, wakeWorker }: ServerDeps): FastifyInst
   function apiUser(req: FastifyRequest, reply: FastifyReply): number | null {
     const s = getSession(db, bearer(req));
     if (!s?.userId) {
-      reply.code(401).send({ error: 'Sesión vencida. Vuelve a poner tu código.' });
+      reply.code(401).send({ error: 'Sesión vencida. Vuelve a entrar.' });
       return null;
     }
     return s.userId;
@@ -120,7 +135,7 @@ export function buildServer({ config, db, wakeWorker }: ServerDeps): FastifyInst
   function allowedApp(uid: number, slug: string, reply: FastifyReply): App | null {
     const a = getApp(db, slug);
     if (!a || !userCanUseApp(db, uid, slug)) {
-      reply.code(404).send({ error: 'Esa app no existe o tu código no tiene acceso.' });
+      reply.code(404).send({ error: 'Esa app no existe o tu cuenta no tiene acceso.' });
       return null;
     }
     return a;
@@ -128,22 +143,50 @@ export function buildServer({ config, db, wakeWorker }: ServerDeps): FastifyInst
 
   // ------------------------------------------------------------ API
 
-  app.post('/api/login', async (req, reply) => {
-    const code = String((req.body as { code?: unknown } | undefined)?.code ?? '');
-    const res = loginWithCode(db, code, req.ip);
-    if (res.kind === 'blocked') {
-      reply.header('retry-after', String(res.retryAfter));
-      return reply.code(429).send({
-        error: `Demasiados intentos. Espera ${Math.ceil(res.retryAfter / 60)} min.`,
-        retryAfter: res.retryAfter,
-      });
+  function blockedError(ip: string): string | null {
+    const wait = retryAfterSeconds(db, ip);
+    return wait > 0 ? `Demasiados intentos. Espera ${Math.ceil(wait / 60)} min.` : null;
+  }
+
+  /** Signs in (or signs up) a verified Google identity and opens a brain session. */
+  function startSession(identity: GoogleIdentity, appSlug: string | null): LoginOutcome {
+    const admin = isAdminEmail(config, identity.email);
+    const res = upsertGoogleUser(db, identity, admin);
+    if (!res.ok) {
+      return res.error === 'disabled'
+        ? { ok: false, status: 403, error: 'Tu cuenta está desactivada.' }
+        : { ok: false, status: 409, error: 'La cuenta de admin todavía no está vinculada: ejecuta user:link en el servidor.' };
     }
-    if (res.kind === 'invalid') return reply.code(401).send({ error: 'Código incorrecto.' });
-    const token = createSession(db, res.user.id, false, config.sessionDays);
+    if (appSlug && getApp(db, appSlug)) grantApps(db, res.user.id, [appSlug]);
+    const token = createSession(db, res.user.id, admin, config.sessionDays);
+    return { ok: true, token, userId: res.user.id, userName: res.user.name };
+  }
+
+  app.post('/api/login', async (_req, reply) =>
+    reply.code(410).send({ error: 'Actualiza la app: ahora se entra con tu cuenta de Google.' }),
+  );
+
+  app.post('/api/login/google', async (req, reply) => {
+    if (!google) return reply.code(503).send({ error: 'El inicio de sesión con Google no está configurado.' });
+    const blocked = blockedError(req.ip);
+    if (blocked) return reply.code(429).send({ error: blocked });
+    const body = (req.body ?? {}) as { idToken?: unknown; app?: unknown };
+    const appSlug = typeof body.app === 'string' ? body.app : null;
+    if (appSlug && !getApp(db, appSlug)) return reply.code(404).send({ error: 'Esa app no existe.' });
+    let identity: GoogleIdentity;
+    try {
+      identity = await google.verifier.verify(String(body.idToken ?? ''));
+    } catch {
+      recordFailure(db, req.ip);
+      return reply.code(401).send({ error: 'No se pudo verificar tu cuenta de Google.' });
+    }
+    clearFailures(db, req.ip);
+    const res = startSession(identity, appSlug);
+    if (!res.ok) return reply.code(res.status).send({ error: res.error });
     return {
-      token,
-      user: { name: res.user.name },
-      apps: appsForUser(db, res.user.id).map((a) => appJson(db, a)),
+      token: res.token,
+      user: { name: res.userName },
+      apps: appsForUser(db, res.userId).map((a) => appJson(db, a)),
     };
   });
 
@@ -184,14 +227,14 @@ export function buildServer({ config, db, wakeWorker }: ServerDeps): FastifyInst
   // --------------------------------------------------------- portal
 
   function portalUser(req: FastifyRequest): number | null {
-    return getSession(db, cookies(req)[USER_COOKIE])?.userId ?? null;
+    return getSession(db, cookies(req)[SESSION_COOKIE])?.userId ?? null;
   }
 
   app.get('/apks', async (req, reply) => {
     reply.type('text/html; charset=utf-8');
     const uid = portalUser(req);
-    if (uid === null) return page('Cerebro · APKs', loginForm('/apks/login', 'Escribe tu código de 4 dígitos.'));
-    const name = (db.prepare('SELECT name FROM users WHERE id = ?').get(uid) as { name: string }).name;
+    if (uid === null) return page('Cerebro · APKs', loginPage('Cerebro', '/apks', google !== undefined));
+    const name = getUser(db, uid)?.name ?? '';
     const apps = appsForUser(db, uid);
     return page(
       'Cerebro · APKs',
@@ -200,7 +243,7 @@ export function buildServer({ config, db, wakeWorker }: ServerDeps): FastifyInst
           <div><h1>Tus apps</h1><div class="muted">Hola, ${name}.</div></div>
           <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
         </div>
-        ${apps.length === 0 ? html`<div class="card">Tu código todavía no tiene apps asignadas.</div>` : ''}
+        ${apps.length === 0 ? html`<div class="card">Tu cuenta todavía no tiene apps asignadas.</div>` : ''}
         ${apps.map((a) => portalAppCard(a, uid))}
       `,
     );
@@ -231,26 +274,46 @@ export function buildServer({ config, db, wakeWorker }: ServerDeps): FastifyInst
       </section>`;
   }
 
-  app.post('/apks/login', async (req, reply) => {
-    const code = String((req.body as { code?: unknown } | undefined)?.code ?? '');
-    const res = loginWithCode(db, code, req.ip);
+  app.get<{ Querystring: { next?: string; app?: string } }>('/auth/google/start', async (req, reply) => {
+    if (!google) return reply.code(503).send('El inicio de sesión con Google no está configurado.');
+    const next = LOGIN_NEXT.includes(req.query.next ?? '') ? (req.query.next as string) : '/apks';
+    const appSlug = req.query.app && getApp(db, req.query.app) ? req.query.app : null;
+    const start = createOAuthState(db, next, appSlug);
+    setCookie(reply, config, OAUTH_COOKIE, start.browserToken, 600, OAUTH_COOKIE_PATH);
+    return reply.redirect(
+      authorizeUrl(google.clientId, `${config.publicUrl}/auth/google/callback`, start.state, start.nonce, pkceChallenge(start.verifier)),
+      302,
+    );
+  });
+
+  app.get<{ Querystring: { code?: string; state?: string } }>('/auth/google/callback', async (req, reply) => {
     reply.type('text/html; charset=utf-8');
-    if (res.kind === 'blocked') {
-      reply.code(429);
-      return page('Cerebro', loginForm('/apks/login', `Demasiados intentos. Espera ${Math.ceil(res.retryAfter / 60)} min.`, true));
+    const fail = (status: number, message: string) =>
+      reply.code(status).send(page('Cerebro', html`<div class="card"><p class="error">${message}</p><p><a href="/apks">Volver</a></p></div>`));
+    if (!google) return fail(503, 'El inicio de sesión con Google no está configurado.');
+    const blocked = blockedError(req.ip);
+    if (blocked) return fail(429, blocked);
+    const state = req.query.state ? consumeOAuthState(db, req.query.state, cookies(req)[OAUTH_COOKIE]) : null;
+    if (!state || !req.query.code) return fail(400, 'El inicio de sesión venció o no es válido. Intenta de nuevo.');
+    let identity: GoogleIdentity;
+    try {
+      const idToken = await google.exchange.exchange(req.query.code, state.verifier, `${config.publicUrl}/auth/google/callback`);
+      identity = await google.verifier.verify(idToken, state.nonce);
+    } catch {
+      recordFailure(db, req.ip);
+      return fail(401, 'No se pudo verificar tu cuenta de Google.');
     }
-    if (res.kind === 'invalid') {
-      reply.code(401);
-      return page('Cerebro', loginForm('/apks/login', 'Código incorrecto.', true));
-    }
-    const token = createSession(db, res.user.id, false, config.sessionDays);
-    setCookie(reply, config, USER_COOKIE, token, config.sessionDays * 86400, '/');
-    return reply.redirect('/apks', 303);
+    clearFailures(db, req.ip);
+    const res = startSession(identity, state.appSlug);
+    if (!res.ok) return fail(res.status, res.error);
+    setCookie(reply, config, SESSION_COOKIE, res.token, config.sessionDays * 86400, '/');
+    setCookie(reply, config, OAUTH_COOKIE, '', 0, OAUTH_COOKIE_PATH);
+    return reply.redirect(state.next, 303);
   });
 
   app.post('/apks/logout', async (req, reply) => {
-    deleteSession(db, cookies(req)[USER_COOKIE]);
-    setCookie(reply, config, USER_COOKIE, '', 0, '/');
+    deleteSession(db, cookies(req)[SESSION_COOKIE]);
+    setCookie(reply, config, SESSION_COOKIE, '', 0, '/');
     return reply.redirect('/apks', 303);
   });
 
@@ -284,16 +347,21 @@ export function buildServer({ config, db, wakeWorker }: ServerDeps): FastifyInst
 
   // ---------------------------------------------------------- admin
 
+  /** Admin rights need the session flag and an email still listed in ADMIN_EMAILS. */
   function isAdmin(req: FastifyRequest): boolean {
-    return getSession(db, cookies(req)[ADMIN_COOKIE])?.isAdmin === true;
+    const s = getSession(db, cookies(req)[SESSION_COOKIE]);
+    return !!s?.isAdmin && isAdminEmail(config, getUser(db, s.userId)?.email);
   }
 
   app.get('/admin', async (req, reply) => {
     reply.type('text/html; charset=utf-8');
-    if (!config.adminPassword) {
-      return page('Cerebro · admin', html`<div class="card">El panel está apagado: falta ADMIN_PASSWORD (16+ caracteres).</div>`);
+    if (!isAdmin(req)) {
+      if (portalUser(req) !== null) {
+        reply.code(403);
+        return page('Cerebro · admin', html`<div class="card">Tu cuenta no es de administrador. <a href="/apks">Volver</a></div>`);
+      }
+      return page('Cerebro · admin', loginPage('Cerebro · admin', '/admin', google !== undefined));
     }
-    if (!isAdmin(req)) return page('Cerebro · admin', adminLoginForm(''));
     const all = listRequests(db, { limit: 60 });
     const pending = all.filter((r) => r.status === 'pending');
     const queue = all.filter((r) => r.status === 'approved' || r.status === 'running');
@@ -303,7 +371,7 @@ export function buildServer({ config, db, wakeWorker }: ServerDeps): FastifyInst
       html`
         <div class="row" style="justify-content:space-between">
           <h1>Cerebro · admin</h1>
-          <form method="post" action="/admin/logout"><button class="secondary">Salir</button></form>
+          <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
         </div>
         <section class="card"><h2>Por aprobar (${pending.length})</h2>
           ${pending.length ? html`<ul class="list">${pending.map(adminPendingItem)}</ul>` : html`<p class="muted">Nada pendiente.</p>`}
@@ -361,30 +429,6 @@ export function buildServer({ config, db, wakeWorker }: ServerDeps): FastifyInst
     </section>`;
   }
 
-  app.post('/admin/login', async (req, reply) => {
-    const password = String((req.body as { password?: unknown } | undefined)?.password ?? '');
-    const res = loginAdmin(db, config.adminPassword, password, req.ip);
-    reply.type('text/html; charset=utf-8');
-    if (res === 'disabled') return reply.code(404).send('No encontrado');
-    if (typeof res === 'object') {
-      reply.code(429);
-      return page('Cerebro · admin', adminLoginForm(`Demasiados intentos. Espera ${Math.ceil(res.retryAfter / 60)} min.`));
-    }
-    if (res === 'invalid') {
-      reply.code(401);
-      return page('Cerebro · admin', adminLoginForm('Clave incorrecta.'));
-    }
-    const token = createSession(db, null, true, 1);
-    setCookie(reply, config, ADMIN_COOKIE, token, 86400, '/admin');
-    return reply.redirect('/admin', 303);
-  });
-
-  app.post('/admin/logout', async (req, reply) => {
-    deleteSession(db, cookies(req)[ADMIN_COOKIE]);
-    setCookie(reply, config, ADMIN_COOKIE, '', 0, '/admin');
-    return reply.redirect('/admin', 303);
-  });
-
   app.post<{ Params: { id: string } }>('/admin/requests/:id/approve', async (req, reply) => {
     if (!isAdmin(req)) return reply.code(403).send('Prohibido');
     if (decideRequest(db, Number(req.params.id), true, null)) wakeWorker?.();
@@ -411,27 +455,12 @@ export function buildServer({ config, db, wakeWorker }: ServerDeps): FastifyInst
   return app;
 }
 
-function loginForm(action: string, message: string, isError = false) {
+function loginPage(title: string, next: string, enabled: boolean) {
   return html`
-    <h1>Cerebro</h1>
-    <form class="card" method="post" action="${action}">
-      <p class="${isError ? 'error' : 'muted'}">${message}</p>
-      <div class="row">
-        <input class="code" type="password" name="code" inputmode="numeric" pattern="\\d{4}" maxlength="4"
-          autocomplete="one-time-code" required autofocus>
-        <button>Entrar</button>
-      </div>
-    </form>`;
-}
-
-function adminLoginForm(message: string) {
-  return html`
-    <h1>Cerebro · admin</h1>
-    <form class="card" method="post" action="/admin/login">
-      ${message ? html`<p class="error">${message}</p>` : ''}
-      <div class="row">
-        <input type="password" name="password" autocomplete="current-password" required autofocus style="flex:1">
-        <button>Entrar</button>
-      </div>
-    </form>`;
+    <h1>${title}</h1>
+    <div class="card">
+      ${enabled
+        ? html`<p><a class="button" href="/auth/google/start?next=${encodeURIComponent(next)}">Entrar con Google</a></p>`
+        : html`<p class="error">El inicio de sesión con Google no está configurado.</p>`}
+    </div>`;
 }

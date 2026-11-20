@@ -2,10 +2,9 @@
  * Admin CLI. Run on the server, next to the database:
  *
  *   npm run cli -- app:jeep                       register jeep-obd2 with its defaults
- *   npm run cli -- user:add osvaldo jeep-obd2     create a user; prints the 4-digit code once
+ *   npm run cli -- user:link osvaldo me@gmail.com link an existing user to the Google account with that email
  *   npm run cli -- user:grant osvaldo app1,app2
  *   npm run cli -- user:revoke osvaldo app1
- *   npm run cli -- user:reset-code osvaldo        prints a new code; old sessions are closed
  *   npm run cli -- user:disable osvaldo | user:enable osvaldo
  *   npm run cli -- user:list
  *   npm run cli -- app:list
@@ -17,14 +16,13 @@ import { JEEP_OBD2 } from './apps.ts';
 import { loadConfig } from './config.ts';
 import { openDb } from './db.ts';
 import {
-  createUser,
   getApp,
   grantApps,
   importBuild,
+  linkUserEmail,
   listApps,
   listUsers,
   maxVersionCode,
-  resetUserCode,
   revokeApps,
   setUserEnabled,
   upsertApp,
@@ -58,11 +56,10 @@ switch (command) {
   case 'app:list':
     for (const a of listApps(db)) console.log(`${a.slug}\t${a.name}\t${a.repoUrl}\t${a.allowedPaths.join(',')}`);
     break;
-  case 'user:add': {
-    const code = createUser(db, need(args[0], 'user name'), list(args[1]));
-    console.log(`User ${args[0]} created. Code (shown only now): ${code}`);
+  case 'user:link':
+    linkUserEmail(db, need(args[0], 'user name'), need(args[1], 'email'));
+    console.log('Done.');
     break;
-  }
   case 'user:grant':
     grantApps(db, userId(db, need(args[0], 'user name')), list(need(args[1], 'app slugs')));
     console.log('Done.');
@@ -71,16 +68,15 @@ switch (command) {
     revokeApps(db, userId(db, need(args[0], 'user name')), list(need(args[1], 'app slugs')));
     console.log('Done.');
     break;
-  case 'user:reset-code':
-    console.log(`New code for ${args[0]} (shown only now): ${resetUserCode(db, need(args[0], 'user name'))}`);
-    break;
   case 'user:disable':
   case 'user:enable':
     setUserEnabled(db, need(args[0], 'user name'), command === 'user:enable');
     console.log('Done.');
     break;
   case 'user:list':
-    for (const u of listUsers(db)) console.log(`${u.name}\t${u.enabled ? 'enabled' : 'disabled'}\t${u.apps.join(',')}`);
+    for (const u of listUsers(db)) {
+      console.log(`${u.id}\t${u.name}\t${u.email ?? '-'}\t${u.enabled ? 'enabled' : 'disabled'}\t${u.apps.join(',')}`);
+    }
     break;
   case 'build:import': {
     const slug = need(args[0], 'app slug');
@@ -100,7 +96,7 @@ switch (command) {
   }
   default:
     console.error(
-      'Commands: app:jeep, app:list, user:add, user:grant, user:revoke, user:reset-code, user:enable, user:disable, user:list, build:import',
+      'Commands: app:jeep, app:list, user:link, user:grant, user:revoke, user:enable, user:disable, user:list, build:import',
     );
     process.exit(2);
 }

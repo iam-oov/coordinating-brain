@@ -6,8 +6,8 @@ import { test } from 'node:test';
 import type { App, Request } from '../src/store.ts';
 import { ClaudeCliRunner, systemPrompt, userPrompt } from '../src/worker/runner.ts';
 import { startWorker } from '../src/worker/worker.ts';
-import { createRequest, createUser, decideRequest, getRequest } from '../src/store.ts';
-import { makeRemoteApp, registerApp, tempDir, testSetup } from './helpers.ts';
+import { createRequest, decideRequest, getRequest } from '../src/store.ts';
+import { createTestUser, makeRemoteApp, registerApp, tempDir, testSetup } from './helpers.ts';
 
 const app: App = {
   slug: 'demo',
@@ -92,7 +92,7 @@ test('worker: wake() processes an approved request right away; stop() ends the l
   const { config, db } = testSetup();
   const { app: remoteApp } = makeRemoteApp();
   registerApp(db, remoteApp);
-  createUser(db, 'osvaldo', [remoteApp.slug]);
+  createTestUser(db, 'osvaldo', 'osvaldo@example.test', [remoteApp.slug]);
   const r = createRequest(db, 1, remoteApp.slug, 'Agregar una pantalla de bienvenida al iniciar');
   assert.ok(r.ok);
   const runner = {

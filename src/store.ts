@@ -1,6 +1,7 @@
 import type { Db } from './db.ts';
 import { tx } from './db.ts';
-import { generateUniqueCode, hashCode } from './auth.ts';
+import type { User } from './auth.ts';
+import type { GoogleIdentity } from './google.ts';
 import { moderate } from './worker/moderation.ts';
 
 export interface App {
@@ -127,26 +128,53 @@ export function userCanUseApp(db: Db, userId: number, slug: string): boolean {
 
 // ---------------------------------------------------------------- users
 
-/** Creates a user with a fresh 4-digit code. Returns the code (shown once). */
-export function createUser(db: Db, name: string, appSlugs: string[], now = Date.now()): string {
+export type GoogleUserResult = { ok: true; user: User; created: boolean } | { ok: false; error: 'admin-unlinked' | 'disabled' };
+
+type UserRow = { id: number; name: string; email: string | null; google_sub: string | null; enabled: number };
+
+/**
+ * Finds the user for a Google account: by subject, else a legacy user with the
+ * same email and no subject yet (which gets linked), else a new user. An admin
+ * email that matches no user is refused while unlinked legacy users exist, so
+ * the admin is linked with `user:link` instead of getting a duplicate account.
+ */
+export function upsertGoogleUser(
+  db: Db,
+  identity: GoogleIdentity,
+  isAdmin: boolean,
+  now = Date.now(),
+): GoogleUserResult {
   return tx(db, () => {
-    const code = generateUniqueCode(db);
-    const { salt, hash } = hashCode(code);
+    const bySub = db.prepare('SELECT * FROM users WHERE google_sub = ?').get(identity.sub) as UserRow | undefined;
+    const byEmail = bySub
+      ? undefined
+      : (db.prepare('SELECT * FROM users WHERE email = ? AND google_sub IS NULL').get(identity.email) as UserRow | undefined);
+    const existing = bySub ?? byEmail;
+    if (existing) {
+      if (existing.enabled !== 1) return { ok: false, error: 'disabled' };
+      db.prepare('UPDATE users SET google_sub = ?, email = ? WHERE id = ?').run(identity.sub, identity.email, existing.id);
+      return { ok: true, created: false, user: { id: existing.id, name: existing.name, email: identity.email } };
+    }
+    if (isAdmin && db.prepare('SELECT 1 FROM users WHERE email IS NULL').get()) return { ok: false, error: 'admin-unlinked' };
     const res = db
-      .prepare('INSERT INTO users (name, code_salt, code_hash, created_at) VALUES (?, ?, ?, ?)')
-      .run(name, salt, hash, now);
-    grantApps(db, Number(res.lastInsertRowid), appSlugs);
-    return code;
+      .prepare('INSERT INTO users (name, email, google_sub, created_at) VALUES (?, ?, ?, ?)')
+      .run(identity.name, identity.email, identity.sub, now);
+    return { ok: true, created: true, user: { id: Number(res.lastInsertRowid), name: identity.name, email: identity.email } };
   });
 }
 
-export function resetUserCode(db: Db, name: string): string {
-  const code = generateUniqueCode(db);
-  const { salt, hash } = hashCode(code);
-  const res = db.prepare('UPDATE users SET code_salt = ?, code_hash = ? WHERE name = ?').run(salt, hash, name);
+export function getUser(db: Db, id: number): User | null {
+  const r = db.prepare('SELECT id, name, email FROM users WHERE id = ?').get(id) as User | undefined;
+  return r ?? null;
+}
+
+export function linkUserEmail(db: Db, name: string, email: string): void {
+  const res = db.prepare('UPDATE users SET email = ? WHERE name = ?').run(email.trim().toLowerCase(), name);
   if (res.changes === 0) throw new Error(`No user named ${name}`);
-  db.prepare('DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE name = ?)').run(name);
-  return code;
+}
+
+export function userBranch(uid: number): string {
+  return `users/${uid}`;
 }
 
 export function userId(db: Db, name: string): number {
@@ -170,15 +198,19 @@ export function setUserEnabled(db: Db, name: string, enabled: boolean): void {
   db.prepare('UPDATE users SET enabled = ? WHERE name = ?').run(enabled ? 1 : 0, name);
 }
 
-export function listUsers(db: Db): { id: number; name: string; enabled: boolean; apps: string[] }[] {
-  const users = db.prepare('SELECT id, name, enabled FROM users ORDER BY name').all() as {
+export function listUsers(
+  db: Db,
+): { id: number; name: string; email: string | null; enabled: boolean; apps: string[] }[] {
+  const users = db.prepare('SELECT id, name, email, enabled FROM users ORDER BY id').all() as {
     id: number;
     name: string;
+    email: string | null;
     enabled: number;
   }[];
   return users.map((u) => ({
     id: u.id,
     name: u.name,
+    email: u.email,
     enabled: u.enabled === 1,
     apps: (
       db.prepare('SELECT app_slug FROM user_apps WHERE user_id = ? ORDER BY app_slug').all(u.id) as {

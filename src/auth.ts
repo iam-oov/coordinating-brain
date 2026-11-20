@@ -6,49 +6,15 @@ import type { Db } from './db.ts';
 export const MAX_FAILURES = 5;
 export const LOCKOUT_MS = 15 * 60 * 1000;
 
-export const CODE_PATTERN = /^\d{4}$/;
-
 export interface User {
   id: number;
   name: string;
+  email: string | null;
 }
 
 export interface Session {
-  userId: number | null;
+  userId: number;
   isAdmin: boolean;
-}
-
-// ---------------------------------------------------------------- codes
-
-export function hashCode(code: string, salt = crypto.randomBytes(16).toString('hex')) {
-  const hash = crypto.scryptSync(code, salt, 32).toString('hex');
-  return { salt, hash };
-}
-
-function codeMatches(code: string, salt: string, hash: string): boolean {
-  const candidate = crypto.scryptSync(code, salt, 32);
-  return crypto.timingSafeEqual(candidate, Buffer.from(hash, 'hex'));
-}
-
-/** The enabled user whose code is [code], or null. Codes are stored hashed. */
-export function findUserByCode(db: Db, code: string): User | null {
-  if (!CODE_PATTERN.test(code)) return null;
-  const rows = db
-    .prepare('SELECT id, name, code_salt, code_hash FROM users WHERE enabled = 1')
-    .all() as { id: number; name: string; code_salt: string; code_hash: string }[];
-  for (const r of rows) {
-    if (codeMatches(code, r.code_salt, r.code_hash)) return { id: r.id, name: r.name };
-  }
-  return null;
-}
-
-/** A 4-digit code no other user has. */
-export function generateUniqueCode(db: Db): string {
-  for (let i = 0; i < 200; i++) {
-    const code = crypto.randomInt(0, 10_000).toString().padStart(4, '0');
-    if (!findUserByCode(db, code)) return code;
-  }
-  throw new Error('No free 4-digit code left');
 }
 
 // -------------------------------------------------------------- lockout
@@ -72,48 +38,6 @@ export function clearFailures(db: Db, ip: string): void {
   db.prepare('DELETE FROM auth_failures WHERE ip = ?').run(ip);
 }
 
-export type LoginResult =
-  | { kind: 'ok'; user: User }
-  | { kind: 'invalid' }
-  | { kind: 'blocked'; retryAfter: number };
-
-/**
- * Checks a 4-digit code. While an IP is blocked, even a correct code is
- * refused, so guessing all 10,000 codes takes years.
- */
-export function loginWithCode(db: Db, code: string, ip: string, now = Date.now()): LoginResult {
-  const wait = retryAfterSeconds(db, ip, now);
-  if (wait > 0) return { kind: 'blocked', retryAfter: wait };
-  const user = findUserByCode(db, code.trim());
-  if (!user) {
-    recordFailure(db, ip, now);
-    const after = retryAfterSeconds(db, ip, now);
-    return after > 0 ? { kind: 'blocked', retryAfter: after } : { kind: 'invalid' };
-  }
-  clearFailures(db, ip);
-  return { kind: 'ok', user };
-}
-
-export function loginAdmin(
-  db: Db,
-  expected: string,
-  given: string,
-  ip: string,
-  now = Date.now(),
-): 'ok' | 'invalid' | 'disabled' | { retryAfter: number } {
-  if (!expected) return 'disabled';
-  const wait = retryAfterSeconds(db, ip, now);
-  if (wait > 0) return { retryAfter: wait };
-  const a = crypto.createHash('sha256').update(expected).digest();
-  const b = crypto.createHash('sha256').update(given).digest();
-  if (crypto.timingSafeEqual(a, b)) {
-    clearFailures(db, ip);
-    return 'ok';
-  }
-  recordFailure(db, ip, now);
-  return 'invalid';
-}
-
 // ------------------------------------------------------------- tokens
 
 function newToken(): string {
@@ -126,7 +50,7 @@ function sha256(s: string): string {
 
 export function createSession(
   db: Db,
-  userId: number | null,
+  userId: number,
   isAdmin: boolean,
   days: number,
   now = Date.now(),
@@ -147,15 +71,64 @@ export function getSession(db: Db, token: string | undefined, now = Date.now()):
   const row = db
     .prepare(
       `SELECT s.user_id, s.is_admin FROM sessions s
-       LEFT JOIN users u ON u.id = s.user_id
-       WHERE s.token_hash = ? AND s.expires_at > ? AND (s.user_id IS NULL OR u.enabled = 1)`,
+       JOIN users u ON u.id = s.user_id
+       WHERE s.token_hash = ? AND s.expires_at > ? AND u.enabled = 1`,
     )
-    .get(sha256(token), now) as { user_id: number | null; is_admin: number } | undefined;
+    .get(sha256(token), now) as { user_id: number; is_admin: number } | undefined;
   return row ? { userId: row.user_id, isAdmin: row.is_admin === 1 } : null;
 }
 
 export function deleteSession(db: Db, token: string | undefined): void {
   if (token) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
+}
+
+const OAUTH_STATE_MS = 10 * 60 * 1000;
+
+export interface OAuthStart {
+  state: string;
+  verifier: string;
+  nonce: string;
+  browserToken: string;
+}
+
+export interface OAuthState {
+  verifier: string;
+  nonce: string;
+  next: string;
+  appSlug: string | null;
+}
+
+export function createOAuthState(db: Db, next: string, appSlug: string | null, now = Date.now()): OAuthStart {
+  const start = { state: newToken(), verifier: newToken(), nonce: newToken(), browserToken: newToken() };
+  db.prepare(
+    `INSERT INTO oauth_states (state_hash, browser_hash, verifier, nonce, next, app_slug, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(sha256(start.state), sha256(start.browserToken), start.verifier, start.nonce, next, appSlug, now + OAUTH_STATE_MS);
+  db.prepare('DELETE FROM oauth_states WHERE expires_at < ?').run(now);
+  return start;
+}
+
+/** Single use: the state is deleted whether or not it matches the browser. */
+export function consumeOAuthState(
+  db: Db,
+  state: string,
+  browserToken: string | undefined,
+  now = Date.now(),
+): OAuthState | null {
+  const hash = sha256(state);
+  const row = db
+    .prepare('SELECT browser_hash, verifier, nonce, next, app_slug, expires_at FROM oauth_states WHERE state_hash = ?')
+    .get(hash) as
+    | { browser_hash: string; verifier: string; nonce: string; next: string; app_slug: string | null; expires_at: number }
+    | undefined;
+  if (!row) return null;
+  db.prepare('DELETE FROM oauth_states WHERE state_hash = ?').run(hash);
+  if (row.expires_at < now || !browserToken || sha256(browserToken) !== row.browser_hash) return null;
+  return { verifier: row.verifier, nonce: row.nonce, next: row.next, appSlug: row.app_slug };
+}
+
+export function pkceChallenge(verifier: string): string {
+  return crypto.createHash('sha256').update(verifier).digest('base64url');
 }
 
 /** One-time link to download an APK from a browser (valid 10 minutes). */

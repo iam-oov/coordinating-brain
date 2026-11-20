@@ -4,15 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 export type Db = DatabaseSync;
 
-/**
- * Schema. Timestamps are epoch milliseconds (INTEGER).
- *
- * - apps: one row per app the brain can change (repo, allowed paths, commands).
- * - users / user_apps: who can send requests, and to which apps.
- * - requests: improvement requests and their lifecycle.
- * - builds: every published APK, linked to the commit that produced it.
- */
-const SCHEMA = `
+export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS apps (
   slug          TEXT PRIMARY KEY,
   name          TEXT NOT NULL,
@@ -90,12 +82,86 @@ CREATE TABLE IF NOT EXISTS builds (
 );
 `;
 
+const GOOGLE_AUTH_AND_BRANCHES = `
+CREATE TABLE users_new (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  email      TEXT UNIQUE,
+  google_sub TEXT UNIQUE,
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL
+);
+INSERT INTO users_new (id, name, enabled, created_at) SELECT id, name, enabled, created_at FROM users;
+DROP TABLE users;
+ALTER TABLE users_new RENAME TO users;
+
+DELETE FROM sessions WHERE user_id IS NULL;
+
+ALTER TABLE requests ADD COLUMN branch     TEXT NOT NULL DEFAULT 'main';
+ALTER TABLE requests ADD COLUMN also_main  INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN main_sha   TEXT;
+ALTER TABLE requests ADD COLUMN branch_sha TEXT;
+
+ALTER TABLE builds ADD COLUMN branch TEXT NOT NULL DEFAULT 'main';
+CREATE INDEX builds_branch ON builds(app_slug, branch, id);
+
+ALTER TABLE apps ADD COLUMN protected_paths TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE apps ADD COLUMN prepare_cmd     TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE oauth_states (
+  state_hash   TEXT PRIMARY KEY,
+  browser_hash TEXT NOT NULL,
+  verifier     TEXT NOT NULL,
+  nonce        TEXT NOT NULL,
+  next         TEXT NOT NULL,
+  app_slug     TEXT,
+  expires_at   INTEGER NOT NULL
+);
+`;
+
+interface Migration {
+  sql: string;
+  rebuildsTables: boolean;
+}
+
+const MIGRATIONS: Migration[] = [
+  { sql: SCHEMA, rebuildsTables: false },
+  { sql: GOOGLE_AUTH_AND_BRANCHES, rebuildsTables: true },
+];
+
+export const SCHEMA_VERSION = MIGRATIONS.length;
+
+/**
+ * Applies the migrations newer than PRAGMA user_version, each in its own
+ * transaction. A migration that rebuilds a table turns foreign keys off around
+ * the transaction (the pragma is ignored inside one) and checks them before
+ * committing, so the rebuild never leaves dangling references.
+ */
+function migrate(db: Db): void {
+  const current = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+  for (let i = current; i < MIGRATIONS.length; i++) {
+    const m = MIGRATIONS[i];
+    if (m.rebuildsTables) db.exec('PRAGMA foreign_keys = OFF;');
+    try {
+      tx(db, () => {
+        db.exec(m.sql);
+        if (m.rebuildsTables && db.prepare('PRAGMA foreign_key_check').all().length > 0) {
+          throw new Error(`Migration ${i + 1} broke foreign keys`);
+        }
+        db.exec(`PRAGMA user_version = ${i + 1};`);
+      });
+    } finally {
+      if (m.rebuildsTables) db.exec('PRAGMA foreign_keys = ON;');
+    }
+  }
+}
+
 export function openDb(file: string): Db {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec('PRAGMA foreign_keys = ON;');
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
-  db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 

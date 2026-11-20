@@ -6,7 +6,6 @@ import { test } from 'node:test';
 import {
   createRequest,
   createRevertRequest,
-  createUser,
   decideRequest,
   getRequest,
   latestBuild,
@@ -15,7 +14,7 @@ import {
 import type { App, Request } from '../src/store.ts';
 import { processRequest } from '../src/worker/pipeline.ts';
 import type { AgentRunner, ImplementInput, ImplementOutput } from '../src/worker/runner.ts';
-import { makeRemoteApp, registerApp, remoteState, sh, tempDir, testSetup } from './helpers.ts';
+import { createTestUser, makeRemoteApp, registerApp, remoteState, sh, tempDir, testSetup } from './helpers.ts';
 
 /** Stands in for Claude: each attempt runs the next scripted step. */
 class FakeRunner implements AgentRunner {
@@ -40,7 +39,7 @@ function setup(text = 'Agregar una pantalla de bienvenida al iniciar') {
   const { config, db } = testSetup();
   const { remote, app } = makeRemoteApp();
   registerApp(db, app);
-  createUser(db, 'osvaldo', [app.slug]);
+  createTestUser(db, 'osvaldo', 'osvaldo@example.test', [app.slug]);
   const created = createRequest(db, 1, app.slug, text);
   assert.ok(created.ok);
   decideRequest(db, created.request.id, true, null);
