@@ -8,7 +8,7 @@
  *   npm run cli -- user:disable osvaldo | user:enable osvaldo
  *   npm run cli -- user:list
  *   npm run cli -- app:list
- *   npm run cli -- build:import jeep-obd2 app.apk 1 e8a28b3   publish an APK built outside the worker
+ *   npm run cli -- build:import jeep-obd2 app.apk 1 e8a28b3 [users/1]   publish an APK built outside the worker
  */
 import fs from 'node:fs';
 
@@ -26,6 +26,7 @@ import {
   revokeApps,
   setUserEnabled,
   upsertApp,
+  userBranch,
   userId,
 } from './store.ts';
 import { storeApk } from './worker/pipeline.ts';
@@ -75,7 +76,7 @@ switch (command) {
     break;
   case 'user:list':
     for (const u of listUsers(db)) {
-      console.log(`${u.id}\t${u.name}\t${u.email ?? '-'}\t${u.enabled ? 'enabled' : 'disabled'}\t${u.apps.join(',')}`);
+      console.log(`${u.id}\t${u.name}\t${u.email ?? '-'}\t${userBranch(u.id)}\t${u.enabled ? 'enabled' : 'disabled'}\t${u.apps.join(',')}`);
     }
     break;
   case 'build:import': {
@@ -83,14 +84,16 @@ switch (command) {
     const apk = need(args[1], 'APK path');
     const versionCode = Number(need(args[2], 'version code'));
     const sha = need(args[3], 'commit SHA');
-    if (!getApp(db, slug)) fail(`Unknown app ${slug}.`);
+    const app = getApp(db, slug) ?? fail(`Unknown app ${slug}.`);
+    const branch = args[4] ?? app.branch;
+    if (branch !== app.branch && !/^users\/\d+$/.test(branch)) fail('Branch must be the main branch or users/<id>.');
     if (!fs.existsSync(apk)) fail(`APK not found: ${apk}`);
     if (!Number.isInteger(versionCode) || versionCode <= maxVersionCode(db, slug)) {
       fail(`Version code must be an integer above ${maxVersionCode(db, slug)}.`);
     }
     if (!/^[0-9a-f]{7,40}$/.test(sha)) fail('Commit SHA must be 7-40 hex characters.');
-    const apkFile = storeApk(config.apksDir, slug, apk, versionCode, sha);
-    importBuild(db, { appSlug: slug, versionCode, apkFile, commitSha: sha });
+    const apkFile = storeApk(config.apksDir, slug, apk, versionCode, sha, branch === app.branch ? '' : branch);
+    importBuild(db, { appSlug: slug, branch, versionCode, apkFile, commitSha: sha });
     console.log(`Build ${apkFile} imported for ${slug}.`);
     break;
   }

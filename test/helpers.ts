@@ -59,6 +59,8 @@ export function makeRemoteApp(): { remote: string; app: App } {
   gitInit(seed);
   fs.writeFileSync(path.join(seed, 'pubspec.yaml'), 'name: demo\nversion: 1.0.0+1\n\nenvironment:\n  sdk: ^3.0.0\n');
   fs.writeFileSync(path.join(seed, 'lib', 'main.dart'), 'void main() {}\n');
+  fs.mkdirSync(path.join(seed, 'lib', 'core'));
+  fs.writeFileSync(path.join(seed, 'lib', 'core', 'auth.dart'), 'const signIn = true;\n');
   fs.writeFileSync(path.join(seed, '.gitignore'), 'out/\n');
   sh(seed, 'git', 'add', '-A');
   sh(seed, 'git', 'commit', '-q', '-m', 'init');
@@ -70,6 +72,8 @@ export function makeRemoteApp(): { remote: string; app: App } {
     repoUrl: remote,
     branch: 'main',
     allowedPaths: ['lib/', 'test/'],
+    protectedPaths: ['lib/core/', 'lib/main.dart'],
+    prepareCmd: '',
     testCmd: '! grep -r BROKEN lib',
     buildCmd: 'mkdir -p out && echo apk > out/app.apk',
     apkPath: 'out/app.apk',
@@ -81,16 +85,43 @@ export function registerApp(db: Db, app: App): void {
   upsertApp(db, app);
 }
 
-/** Files and last commit subject of the remote's main branch. */
-export function remoteState(remote: string): { subject: string; files: string[]; pubspec: string; log: string[] } {
+export interface RemoteState {
+  subject: string;
+  files: string[];
+  pubspec: string;
+  log: string[];
+  read(file: string): string;
+}
+
+/** Files and commit subjects of one branch of the remote. */
+export function remoteState(remote: string, branch = 'main'): RemoteState {
   const clone = path.join(tempDir('brain-check-'), 'c');
-  sh(path.dirname(clone), 'git', 'clone', '-q', remote, clone);
+  sh(path.dirname(clone), 'git', 'clone', '-q', '--branch', branch, remote, clone);
   return {
+    read: (file) => fs.readFileSync(path.join(clone, file), 'utf8'),
     subject: sh(clone, 'git', 'log', '-1', '--format=%s'),
     files: sh(clone, 'git', 'ls-files').split('\n'),
     pubspec: fs.readFileSync(path.join(clone, 'pubspec.yaml'), 'utf8'),
     log: sh(clone, 'git', 'log', '--format=%s').split('\n'),
   };
+}
+
+export function remoteBranches(remote: string): string[] {
+  return sh(remote, 'git', 'for-each-ref', '--format=%(refname:short)', 'refs/heads').split('\n').filter(Boolean).sort();
+}
+
+/** Commits [files] straight to [branch] of the remote, creating it from main if needed. */
+export function pushToRemote(remote: string, branch: string, files: Record<string, string>, message = 'external change'): void {
+  const clone = path.join(tempDir('brain-push-'), 'c');
+  sh(path.dirname(clone), 'git', 'clone', '-q', remote, clone);
+  sh(clone, 'git', 'checkout', '-q', '-B', branch, sh(clone, 'git', 'ls-remote', '--heads', 'origin', branch) ? `origin/${branch}` : 'origin/main');
+  for (const [file, content] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(clone, file)), { recursive: true });
+    fs.writeFileSync(path.join(clone, file), content);
+  }
+  sh(clone, 'git', 'add', '-A');
+  sh(clone, 'git', '-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '--allow-empty', '-m', message);
+  sh(clone, 'git', 'push', '-q', 'origin', `HEAD:refs/heads/${branch}`);
 }
 
 export function createTestUser(db: Db, name: string, email: string, apps: string[], sub = `sub-${email}`): number {

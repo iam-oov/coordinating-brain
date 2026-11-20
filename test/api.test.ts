@@ -59,15 +59,15 @@ async function webLogin(s: Setup, claims: IdTokenClaims, next = '/apks') {
 
 const VALID = 'Agregar un botón para compartir el código de falla';
 
-function publishBuild(s: Setup, versionCode: number, sha: string, body: string) {
-  const dir = path.join(s.config.apksDir, 'demo');
-  fs.mkdirSync(dir, { recursive: true });
-  const file = `demo-v${versionCode}-${sha.slice(0, 7)}.apk`;
-  fs.writeFileSync(path.join(dir, file), body);
+function publishBuild(s: Setup, versionCode: number, sha: string, body: string, branch = 'main') {
+  const sub = branch === 'main' ? '' : branch;
+  fs.mkdirSync(path.join(s.config.apksDir, 'demo', sub), { recursive: true });
+  const file = path.posix.join(sub, `demo-v${versionCode}-${sha.slice(0, 7)}.apk`);
+  fs.writeFileSync(path.join(s.config.apksDir, 'demo', file), body);
   const req = s.db
     .prepare(`INSERT INTO requests (app_slug, user_id, text, status, created_at) VALUES ('demo', NULL, 'x', 'built', 0)`)
     .run();
-  addBuild(s.db, { requestId: Number(req.lastInsertRowid), appSlug: 'demo', versionCode, apkFile: file, commitSha: sha });
+  addBuild(s.db, { requestId: Number(req.lastInsertRowid), appSlug: 'demo', branch, versionCode, apkFile: file, commitSha: sha });
 }
 
 test('Google sign-in from the app signs up the user and grants only the requesting app', async () => {
@@ -297,4 +297,47 @@ test('HTML escapes request text', async () => {
   const panel = await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie } });
   assert.match(panel.body, /&lt;b&gt;negritas&lt;\/b&gt; &amp; &quot;comillas&quot;/);
   assert.doesNotMatch(panel.body, /<b>negritas<\/b>/);
+});
+
+test('"También a main" is offered and stored only for an admin\'s own request', async () => {
+  const s = await setup();
+  await s.server.inject({ method: 'POST', url: '/api/apps/demo/requests', headers: await bearer(s, OSVALDO), payload: { text: VALID } });
+  await s.server.inject({ method: 'POST', url: '/api/apps/demo/requests', headers: await bearer(s, ADMIN), payload: { text: VALID } });
+  const [mine, theirs] = listRequests(s.db);
+  assert.equal(mine.branch, `users/${mine.userId}`);
+  assert.equal(theirs.branch, `users/${theirs.userId}`);
+
+  const admin = await webLogin(s, ADMIN, '/admin');
+  const panel = await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } });
+  assert.equal(panel.body.match(/También a main/g)?.length, 1);
+  assert.match(panel.body, new RegExp(`/admin/requests/${mine.id}/approve" class="row">\\s*<label`));
+
+  const approve = (id: number) =>
+    s.server.inject({
+      method: 'POST',
+      url: `/admin/requests/${id}/approve`,
+      headers: { cookie: admin.cookie, 'content-type': 'application/x-www-form-urlencoded' },
+      payload: 'alsoMain=on',
+    });
+  await approve(theirs.id);
+  await approve(mine.id);
+  assert.equal(getRequest(s.db, theirs.id)?.alsoMain, false);
+  assert.equal(getRequest(s.db, mine.id)?.alsoMain, true);
+});
+
+test('downloads: your own build, else main\'s; never another user\'s', async () => {
+  const s = await setup();
+  const osvaldo = await bearer(s, OSVALDO);
+  const ana = await bearer(s, ANA);
+  publishBuild(s, 1, 'aaaaaaa1', 'main-apk');
+  publishBuild(s, 2, 'bbbbbbb2', 'osvaldo-apk', 'users/1');
+
+  const link = async (headers: Record<string, string>) =>
+    (await s.server.inject({ method: 'POST', url: '/api/apps/demo/download-link', headers })).json().url as string;
+  const fetchApk = async (url: string) => (await s.server.inject({ method: 'GET', url: url.replace(s.config.publicUrl, '') })).body;
+  assert.equal(await fetchApk(await link(osvaldo)), 'osvaldo-apk');
+  assert.equal(await fetchApk(await link(ana)), 'main-apk');
+
+  const apps = (await s.server.inject({ method: 'GET', url: '/api/apps', headers: ana })).json().apps;
+  assert.equal(apps[0].latest.versionCode, 1);
 });

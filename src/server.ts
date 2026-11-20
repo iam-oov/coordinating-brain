@@ -31,9 +31,10 @@ import {
   decideRequest,
   getApp,
   getBuild,
+  getRequest,
   getUser,
   grantApps,
-  latestBuild,
+  latestBuildFor,
   listApps,
   listBuilds,
   listRequests,
@@ -100,8 +101,8 @@ function requestJson(db: Db, r: Request) {
   };
 }
 
-function appJson(db: Db, a: App) {
-  return { slug: a.slug, name: a.name, latest: buildJson(latestBuild(db, a.slug)) };
+function appJson(db: Db, a: App, uid: number) {
+  return { slug: a.slug, name: a.name, latest: buildJson(latestBuildFor(db, a, uid)) };
 }
 
 // -------------------------------------------------------------- server
@@ -186,14 +187,14 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return {
       token: res.token,
       user: { name: res.userName },
-      apps: appsForUser(db, res.userId).map((a) => appJson(db, a)),
+      apps: appsForUser(db, res.userId).map((a) => appJson(db, a, res.userId)),
     };
   });
 
   app.get('/api/apps', async (req, reply) => {
     const uid = apiUser(req, reply);
     if (uid === null) return reply;
-    return { apps: appsForUser(db, uid).map((a) => appJson(db, a)) };
+    return { apps: appsForUser(db, uid).map((a) => appJson(db, a, uid)) };
   });
 
   app.get<{ Params: { slug: string } }>('/api/apps/:slug/requests', async (req, reply) => {
@@ -218,8 +219,9 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   app.post<{ Params: { slug: string } }>('/api/apps/:slug/download-link', async (req, reply) => {
     const uid = apiUser(req, reply);
     if (uid === null) return reply;
-    if (!allowedApp(uid, req.params.slug, reply)) return reply;
-    if (!latestBuild(db, req.params.slug)) return reply.code(404).send({ error: 'Todavía no hay un APK de esta app.' });
+    const a = allowedApp(uid, req.params.slug, reply);
+    if (!a) return reply;
+    if (!latestBuildFor(db, a, uid)) return reply.code(404).send({ error: 'Todavía no hay un APK de esta app.' });
     const token = createDownloadToken(db, uid, req.params.slug);
     return { url: `${config.publicUrl}/apks/${req.params.slug}/latest.apk?dl=${token}` };
   });
@@ -244,13 +246,14 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
           <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
         </div>
         ${apps.length === 0 ? html`<div class="card">Tu cuenta todavía no tiene apps asignadas.</div>` : ''}
+        <p class="muted">Tus solicitudes y tu versión de cada app son públicas en GitHub.</p>
         ${apps.map((a) => portalAppCard(a, uid))}
       `,
     );
   });
 
   function portalAppCard(a: App, uid: number) {
-    const b = latestBuild(db, a.slug);
+    const b = latestBuildFor(db, a, uid);
     const reqs = listRequests(db, { userId: uid, appSlug: a.slug, limit: 5 });
     return html`
       <section class="card">
@@ -333,8 +336,9 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     const slug = req.params.slug;
     let uid = portalUser(req);
     if (uid === null && req.query.dl) uid = useDownloadToken(db, req.query.dl, slug);
-    if (uid === null || !userCanUseApp(db, uid, slug)) return reply.code(404).send('No encontrado');
-    const b = latestBuild(db, slug);
+    const a = getApp(db, slug);
+    if (uid === null || !a || !userCanUseApp(db, uid, slug)) return reply.code(404).send('No encontrado');
+    const b = latestBuildFor(db, a, uid);
     if (!b) return reply.code(404).send('Todavía no hay un APK de esta app.');
     const file = path.join(config.apksDir, slug, b.apkFile);
     if (!fs.existsSync(file)) return reply.code(404).send('El archivo del APK no está en el servidor.');
@@ -387,13 +391,22 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     );
   });
 
+  function authorIsAdmin(r: Request): boolean {
+    return r.userId !== null && isAdminEmail(config, getUser(db, r.userId)?.email);
+  }
+
   function adminPendingItem(r: Request) {
     return html`<li>
       <div><strong>${r.appSlug}</strong> · ${r.userName ?? 'sistema'} · <span class="muted">${fmtDate(r.createdAt)}</span></div>
       <p>${r.text}</p>
       ${r.flags.map((f) => html`<div class="flag">⚠ ${f}</div>`)}
       <div class="row">
-        <form method="post" action="/admin/requests/${r.id}/approve"><button>Aprobar</button></form>
+        <form method="post" action="/admin/requests/${r.id}/approve" class="row">
+          ${authorIsAdmin(r)
+            ? html`<label class="row"><input type="checkbox" name="alsoMain" value="on" style="width:auto"> También a main</label>`
+            : ''}
+          <button>Aprobar</button>
+        </form>
         <form method="post" action="/admin/requests/${r.id}/reject" class="row">
           <input type="text" name="reason" placeholder="Motivo (opcional)" style="width:auto">
           <button class="danger">Rechazar</button>
@@ -405,7 +418,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   function adminHistoryItem(r: Request) {
     return html`<li>
       <div class="row" style="justify-content:space-between">
-        <span><strong>#${r.id}</strong> ${r.appSlug} · ${r.userName ?? 'sistema'}</span>
+        <span><strong>#${r.id}</strong> ${r.appSlug} · ${r.userName ?? 'sistema'} · <span class="muted">${r.branch}${r.alsoMain ? ' + main' : ''}</span></span>
         <span class="status ${r.status}">${STATUS_LABEL[r.status]}</span>
       </div>
       <div>${r.text}</div>
@@ -415,30 +428,39 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   }
 
   function adminBuildsCard(a: App) {
-    const builds = listBuilds(db, a.slug, 10);
+    const byBranch = new Map<string, Build[]>();
+    for (const b of listBuilds(db, a.slug, 40)) byBranch.set(b.branch, [...(byBranch.get(b.branch) ?? []), b]);
+    const branches = [...byBranch.keys()].sort((x, y) => (x === a.branch ? -1 : y === a.branch ? 1 : x.localeCompare(y)));
     return html`<section class="card"><h2>APKs de ${a.name}</h2>
-      ${builds.length
-        ? html`<ul class="list">${builds.map(
-            (b, i) => html`<li class="row" style="justify-content:space-between">
-              <span>v${b.versionCode} · ${b.commitSha.slice(0, 7)} · <span class="muted">${fmtDate(b.createdAt)}</span>
-                ${i === 0 ? html` <span class="status built">actual</span>` : ''}</span>
-              <form method="post" action="/admin/builds/${b.id}/revert"><button class="secondary">Revertir este cambio</button></form>
-            </li>`,
-          )}</ul>`
+      ${branches.length
+        ? branches.map(
+            (branch) => html`<h3>${branch}</h3><ul class="list">${byBranch
+              .get(branch)!
+              .slice(0, 5)
+              .map(
+                (b, i) => html`<li class="row" style="justify-content:space-between">
+                  <span>v${b.versionCode} · ${b.commitSha.slice(0, 7)} · <span class="muted">${fmtDate(b.createdAt)}</span>
+                    ${i === 0 ? html` <span class="status built">actual</span>` : ''}</span>
+                  <form method="post" action="/admin/builds/${b.id}/revert"><button class="secondary">Revertir este cambio</button></form>
+                </li>`,
+              )}</ul>`,
+          )
         : html`<p class="muted">Sin builds todavía.</p>`}
     </section>`;
   }
 
   app.post<{ Params: { id: string } }>('/admin/requests/:id/approve', async (req, reply) => {
     if (!isAdmin(req)) return reply.code(403).send('Prohibido');
-    if (decideRequest(db, Number(req.params.id), true, null)) wakeWorker?.();
+    const r = getRequest(db, Number(req.params.id));
+    const alsoMain = (req.body as { alsoMain?: unknown } | undefined)?.alsoMain === 'on' && !!r && authorIsAdmin(r);
+    if (r && decideRequest(db, r.id, { approve: true, alsoMain })) wakeWorker?.();
     return reply.redirect('/admin', 303);
   });
 
   app.post<{ Params: { id: string } }>('/admin/requests/:id/reject', async (req, reply) => {
     if (!isAdmin(req)) return reply.code(403).send('Prohibido');
     const reason = String((req.body as { reason?: unknown } | undefined)?.reason ?? '').trim();
-    decideRequest(db, Number(req.params.id), false, reason || null);
+    decideRequest(db, Number(req.params.id), { approve: false, reason: reason || null });
     return reply.redirect('/admin', 303);
   });
 

@@ -15,6 +15,8 @@ const app: App = {
   repoUrl: 'x',
   branch: 'main',
   allowedPaths: ['lib/', 'test/'],
+  protectedPaths: ['lib/core/'],
+  prepareCmd: '',
   testCmd: 'true',
   buildCmd: 'true',
   apkPath: 'x.apk',
@@ -102,7 +104,7 @@ test('worker: wake() processes an approved request right away; stop() ends the l
     },
   };
   const worker = startWorker({ db, config, runner }, 60_000);
-  decideRequest(db, r.request.id, true, null);
+  decideRequest(db, r.request.id, { approve: true });
   worker.wake();
   for (let i = 0; i < 100 && getRequest(db, r.request.id)?.status !== 'built'; i++) {
     await new Promise((res) => setTimeout(res, 50));

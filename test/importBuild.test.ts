@@ -15,7 +15,7 @@ test('an imported build is published as the latest APK with a finished request',
   fs.writeFileSync(source, 'apk-bytes');
 
   const apkFile = storeApk(s.config.apksDir, 'jeep-obd2', source, 1, 'e8a28b3abcdef');
-  const build = importBuild(s.db, { appSlug: 'jeep-obd2', versionCode: 1, apkFile, commitSha: 'e8a28b3abcdef' });
+  const build = importBuild(s.db, { appSlug: 'jeep-obd2', branch: 'main', versionCode: 1, apkFile, commitSha: 'e8a28b3abcdef' });
 
   assert.equal(apkFile, 'jeep-obd2-v1-e8a28b3.apk');
   assert.equal(fs.readFileSync(path.join(s.config.apksDir, 'jeep-obd2', apkFile), 'utf8'), 'apk-bytes');

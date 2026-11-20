@@ -76,6 +76,29 @@ test('rejects new lines that touch keys or process/env access', async () => {
   }
 });
 
+test('rejects any change to the protected core, including deleting it', async () => {
+  const dir = repo();
+  write(dir, 'lib/core/auth.dart', 'const a = 1;\n');
+  sh(dir, 'git', 'add', '-A');
+  sh(dir, 'git', 'commit', '-q', '-m', 'core');
+  fs.rmSync(path.join(dir, 'lib', 'core', 'auth.dart'));
+  write(dir, 'lib/main.dart', 'void main() { print(1); }\n');
+  write(dir, 'lib/core_extras.dart', '// not core\n');
+  const g = await checkDiff(dir, ALLOWED, ['lib/core/', 'lib/main.dart']);
+  const text = g.problems.join('\n');
+  assert.match(text, /lib\/core\/auth\.dart: núcleo protegido/);
+  assert.match(text, /lib\/main\.dart: núcleo protegido/);
+  assert.doesNotMatch(text, /core_extras/);
+});
+
+test('rejects long encoded blobs in new lines', async () => {
+  const dir = repo();
+  write(dir, 'lib/blob.dart', `const b = '${'QUJD'.repeat(40)}';\nconst h = '${'ab'.repeat(40)}';\n`);
+  const g = await checkDiff(dir, ALLOWED);
+  assert.equal(g.problems.filter((p) => /datos codificados largos/.test(p)).length, 1);
+  assert.equal(g.ok, false);
+});
+
 test('rejects changes that are too large', async () => {
   const dir = repo();
   write(dir, 'lib/big.dart', 'int a = 1;\n'.repeat(900));

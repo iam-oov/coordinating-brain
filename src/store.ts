@@ -10,6 +10,8 @@ export interface App {
   repoUrl: string;
   branch: string;
   allowedPaths: string[];
+  protectedPaths: string[];
+  prepareCmd: string;
   testCmd: string;
   buildCmd: string;
   apkPath: string;
@@ -32,6 +34,10 @@ export interface Request {
   kind: 'change' | 'revert';
   text: string;
   revertSha: string | null;
+  branch: string;
+  alsoMain: boolean;
+  mainSha: string | null;
+  branchSha: string | null;
   status: RequestStatus;
   flags: string[];
   reason: string | null;
@@ -46,6 +52,7 @@ export interface Build {
   id: number;
   requestId: number;
   appSlug: string;
+  branch: string;
   versionCode: number;
   apkFile: string;
   commitSha: string;
@@ -63,6 +70,8 @@ type AppRow = {
   repo_url: string;
   branch: string;
   allowed_paths: string;
+  protected_paths: string;
+  prepare_cmd: string;
   test_cmd: string;
   build_cmd: string;
   apk_path: string;
@@ -75,6 +84,8 @@ function toApp(r: AppRow): App {
     repoUrl: r.repo_url,
     branch: r.branch,
     allowedPaths: JSON.parse(r.allowed_paths) as string[],
+    protectedPaths: JSON.parse(r.protected_paths) as string[],
+    prepareCmd: r.prepare_cmd,
     testCmd: r.test_cmd,
     buildCmd: r.build_cmd,
     apkPath: r.apk_path,
@@ -83,10 +94,11 @@ function toApp(r: AppRow): App {
 
 export function upsertApp(db: Db, app: App, now = Date.now()): void {
   db.prepare(
-    `INSERT INTO apps (slug, name, repo_url, branch, allowed_paths, test_cmd, build_cmd, apk_path, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO apps (slug, name, repo_url, branch, allowed_paths, protected_paths, prepare_cmd, test_cmd, build_cmd, apk_path, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(slug) DO UPDATE SET name = excluded.name, repo_url = excluded.repo_url,
-       branch = excluded.branch, allowed_paths = excluded.allowed_paths, test_cmd = excluded.test_cmd,
+       branch = excluded.branch, allowed_paths = excluded.allowed_paths, protected_paths = excluded.protected_paths,
+       prepare_cmd = excluded.prepare_cmd, test_cmd = excluded.test_cmd,
        build_cmd = excluded.build_cmd, apk_path = excluded.apk_path`,
   ).run(
     app.slug,
@@ -94,6 +106,8 @@ export function upsertApp(db: Db, app: App, now = Date.now()): void {
     app.repoUrl,
     app.branch,
     JSON.stringify(app.allowedPaths),
+    JSON.stringify(app.protectedPaths),
+    app.prepareCmd,
     app.testCmd,
     app.buildCmd,
     app.apkPath,
@@ -230,6 +244,10 @@ type RequestRow = {
   kind: 'change' | 'revert';
   text: string;
   revert_sha: string | null;
+  branch: string;
+  also_main: number;
+  main_sha: string | null;
+  branch_sha: string | null;
   status: RequestStatus;
   flags: string | null;
   reason: string | null;
@@ -251,6 +269,10 @@ function toRequest(r: RequestRow): Request {
     kind: r.kind,
     text: r.text,
     revertSha: r.revert_sha,
+    branch: r.branch,
+    alsoMain: r.also_main === 1,
+    mainSha: r.main_sha,
+    branchSha: r.branch_sha,
     status: r.status,
     flags: r.flags ? (JSON.parse(r.flags) as string[]) : [],
     reason: r.reason,
@@ -280,8 +302,8 @@ export function createRequest(
     .get(uid, appSlug, ...OPEN);
   if (open) return { ok: false, error: 'Ya tienes una solicitud en curso para esta app. Espera a que termine.' };
   const res = db
-    .prepare('INSERT INTO requests (app_slug, user_id, text, flags, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(appSlug, uid, text.trim(), m.flags.length ? JSON.stringify(m.flags) : null, now);
+    .prepare('INSERT INTO requests (app_slug, user_id, text, flags, branch, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(appSlug, uid, text.trim(), m.flags.length ? JSON.stringify(m.flags) : null, userBranch(uid), now);
   return { ok: true, request: getRequest(db, Number(res.lastInsertRowid))! };
 }
 
@@ -289,10 +311,17 @@ export function createRequest(
 export function createRevertRequest(db: Db, build: Build, now = Date.now()): Request {
   const res = db
     .prepare(
-      `INSERT INTO requests (app_slug, user_id, kind, text, revert_sha, status, created_at, decided_at)
-       VALUES (?, NULL, 'revert', ?, ?, 'approved', ?, ?)`,
+      `INSERT INTO requests (app_slug, user_id, kind, text, revert_sha, branch, status, created_at, decided_at)
+       VALUES (?, NULL, 'revert', ?, ?, ?, 'approved', ?, ?)`,
     )
-    .run(build.appSlug, `Revertir build v${build.versionCode} (${build.commitSha.slice(0, 7)})`, build.commitSha, now, now);
+    .run(
+      build.appSlug,
+      `Revertir build v${build.versionCode} (${build.commitSha.slice(0, 7)}) de ${build.branch}`,
+      build.commitSha,
+      build.branch,
+      now,
+      now,
+    );
   return getRequest(db, Number(res.lastInsertRowid))!;
 }
 
@@ -316,18 +345,26 @@ export function listRequests(db: Db, filter: { userId?: number; appSlug?: string
   return (db.prepare(sql).all(...args, filter.limit ?? 50) as RequestRow[]).map(toRequest);
 }
 
+export interface Decision {
+  approve: boolean;
+  reason?: string | null;
+  alsoMain?: boolean;
+  now?: number;
+}
+
 /** Admin decision on a pending request. Returns false if it was not pending. */
-export function decideRequest(
-  db: Db,
-  id: number,
-  approve: boolean,
-  reason: string | null,
-  now = Date.now(),
-): boolean {
+export function decideRequest(db: Db, id: number, d: Decision): boolean {
   const res = db
-    .prepare(`UPDATE requests SET status = ?, reason = ?, decided_at = ? WHERE id = ? AND status = 'pending'`)
-    .run(approve ? 'approved' : 'rejected', reason, now, id);
+    .prepare(
+      `UPDATE requests SET status = ?, reason = ?, also_main = ?, decided_at = ? WHERE id = ? AND status = 'pending'`,
+    )
+    .run(d.approve ? 'approved' : 'rejected', d.reason ?? null, d.approve && d.alsoMain ? 1 : 0, d.now ?? Date.now(), id);
   return res.changes === 1;
+}
+
+export function recordPushedSha(db: Db, id: number, target: 'main' | 'branch', sha: string): void {
+  const column = target === 'main' ? 'main_sha' : 'branch_sha';
+  db.prepare(`UPDATE requests SET ${column} = ? WHERE id = ?`).run(sha, id);
 }
 
 /** Takes the oldest approved request and marks it running. */
@@ -373,6 +410,7 @@ type BuildRow = {
   id: number;
   request_id: number;
   app_slug: string;
+  branch: string;
   version_code: number;
   apk_file: string;
   commit_sha: string;
@@ -384,6 +422,7 @@ function toBuild(r: BuildRow): Build {
     id: r.id,
     requestId: r.request_id,
     appSlug: r.app_slug,
+    branch: r.branch,
     versionCode: r.version_code,
     apkFile: r.apk_file,
     commitSha: r.commit_sha,
@@ -394,9 +433,9 @@ function toBuild(r: BuildRow): Build {
 export function addBuild(db: Db, b: Omit<Build, 'id' | 'createdAt'>, now = Date.now()): Build {
   const res = db
     .prepare(
-      'INSERT INTO builds (request_id, app_slug, version_code, apk_file, commit_sha, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      'INSERT INTO builds (request_id, app_slug, branch, version_code, apk_file, commit_sha, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
     )
-    .run(b.requestId, b.appSlug, b.versionCode, b.apkFile, b.commitSha, now);
+    .run(b.requestId, b.appSlug, b.branch, b.versionCode, b.apkFile, b.commitSha, now);
   return { ...b, id: Number(res.lastInsertRowid), createdAt: now };
 }
 
@@ -408,10 +447,10 @@ export function importBuild(
   return tx(db, () => {
     const res = db
       .prepare(
-        `INSERT INTO requests (app_slug, user_id, kind, text, status, reason, created_at, decided_at, started_at, finished_at)
-         VALUES (?, NULL, 'change', ?, 'built', ?, ?, ?, ?, ?)`,
+        `INSERT INTO requests (app_slug, user_id, kind, text, branch, status, reason, created_at, decided_at, started_at, finished_at)
+         VALUES (?, NULL, 'change', ?, ?, 'built', ?, ?, ?, ?, ?)`,
       )
-      .run(b.appSlug, `Imported build v${b.versionCode}`, 'Built outside the worker.', now, now, now, now);
+      .run(b.appSlug, `Imported build v${b.versionCode}`, b.branch, 'Built outside the worker.', now, now, now, now);
     return addBuild(db, { ...b, requestId: Number(res.lastInsertRowid) }, now);
   });
 }
@@ -423,15 +462,29 @@ export function latestBuild(db: Db, appSlug: string): Build | null {
   return r ? toBuild(r) : null;
 }
 
+export function latestBuildOn(db: Db, appSlug: string, branch: string): Build | null {
+  const r = db
+    .prepare('SELECT * FROM builds WHERE app_slug = ? AND branch = ? ORDER BY id DESC LIMIT 1')
+    .get(appSlug, branch) as BuildRow | undefined;
+  return r ? toBuild(r) : null;
+}
+
+/** The user's own version if it has one, else the app's main version. Never another user's. */
+export function latestBuildFor(db: Db, app: App, uid: number): Build | null {
+  return latestBuildOn(db, app.slug, userBranch(uid)) ?? latestBuildOn(db, app.slug, app.branch);
+}
+
 export function getBuild(db: Db, id: number): Build | null {
   const r = db.prepare('SELECT * FROM builds WHERE id = ?').get(id) as BuildRow | undefined;
   return r ? toBuild(r) : null;
 }
 
-export function buildForRequest(db: Db, requestId: number): Build | null {
-  const r = db.prepare('SELECT * FROM builds WHERE request_id = ? ORDER BY id DESC LIMIT 1').get(requestId) as
-    | BuildRow
-    | undefined;
+export function buildForRequest(db: Db, requestId: number, branch?: string): Build | null {
+  const r = (
+    branch === undefined
+      ? db.prepare('SELECT * FROM builds WHERE request_id = ? ORDER BY id DESC LIMIT 1').get(requestId)
+      : db.prepare('SELECT * FROM builds WHERE request_id = ? AND branch = ? ORDER BY id DESC LIMIT 1').get(requestId, branch)
+  ) as BuildRow | undefined;
   return r ? toBuild(r) : null;
 }
 

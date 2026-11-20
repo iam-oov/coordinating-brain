@@ -1,6 +1,6 @@
 # coordinating-brain
 
-Backend that lets the users of an app ask for improvements. The owner approves each request, Claude Code implements it, the brain verifies and builds the app, pushes the change to the app's `main` branch, and publishes the new APK at a fixed URL.
+Backend that lets the users of an app ask for improvements. The owner approves each request, Claude Code implements it, the brain verifies and builds the app, pushes the change to the user's own branch of the app (`users/<id>`), and publishes that user's APK at a fixed URL. Every user gets their own version of the app.
 
 Inspired by [midudev/tuweb.dev](https://github.com/midudev/tuweb.dev), taken from one website to several apps and users. First app: [jeep-obd2](https://github.com/iam-oov/jeep-obd2).
 
@@ -12,8 +12,8 @@ Inspired by [midudev/tuweb.dev](https://github.com/midudev/tuweb.dev), taken fro
  app "Buzón" / portal        admin (/admin)            worker                         GitHub + portal
 ┌──────────────────┐     ┌──────────────────┐     ┌───────────────────────────┐     ┌──────────────────┐
 │ user signs in    │     │ owner approves   │     │ Claude Code edits files   │     │ commit pushed to │
-│ with Google and  │ ──▶ │ or rejects each  │ ──▶ │ diff gate · tests · build │ ──▶ │ main · APK at    │
-│ sends a request  │     │ request          │     │ up to 3 attempts          │     │ /apks/<app>/...  │
+│ with Google and  │ ──▶ │ or rejects each  │ ──▶ │ diff gate · tests · build │ ──▶ │ users/<id> · APK │
+│ sends a request  │     │ request          │     │ up to 3 attempts          │     │ for that user    │
 └──────────────────┘     └──────────────────┘     └───────────────────────────┘     └──────────────────┘
 ```
 
@@ -21,10 +21,14 @@ Inspired by [midudev/tuweb.dev](https://github.com/midudev/tuweb.dev), taken fro
 2. **First filter.** A local heuristic refuses empty, oversized or fence-breaking text, and flags suspicious text (prompt injection, secrets, commands, build files) for the admin.
 3. **Approval.** Only the owner, at `/admin`, approves or rejects. Nothing runs before that.
 4. **Implementation.** The worker clones the app and runs Claude Code with file tools only (`Read`, `Edit`, `Write`, `Glob`, `Grep`): no shell, no network, no MCP, `--bare` (no user hooks or settings), and a budget cap. The request is passed **fenced as data**, never as instructions. The AI may refuse with `RECHAZO:`.
-5. **Diff gate.** Only the app's allowed folders (`lib/`, `test/`, `assets/` for jeep-obd2); never `android/`, `ios/`, `pubspec.*`, CI, `CLAUDE.md`, secrets or key files; at most 800 changed lines; no binary files; no new line with keys, `String.fromEnvironment`, `Platform.environment` or `Process.run`.
-6. **Verification.** The worker (not the AI) runs the app's test and build commands. On failure, the output goes back to the AI for another attempt (3 in total). If it never passes, nothing is pushed.
-7. **Publish.** The worker bumps the build number, commits, and pushes to `main`. If `main` moved meanwhile, the local commit is rebased and verified again. Never a force push. Only then is the APK copied to the portal.
-8. **Rollback.** From `/admin`, "Revertir este cambio" creates a new `git revert` commit and a new APK. History is never rewritten.
+5. **Diff gate.** Only the app's allowed folders (`lib/`, `test/`, `assets/` for jeep-obd2), minus its **protected core** (`lib/core/`, `test/core/`, `lib/main.dart`: Google sign-in and the suggestions button); never `android/`, `ios/`, `pubspec.*`, CI, `CLAUDE.md`, secrets or key files; at most 800 changed lines; no binary files; no new line with keys, long encoded blobs, `String.fromEnvironment`, `Platform.environment` or `Process.run`.
+6. **Verification.** The worker (not the AI) runs the app's prepare, test and build commands. On failure, the output goes back to the AI for another attempt (3 in total). If it never passes, nothing is pushed.
+7. **Publish.** The worker bumps the build number (one counter per app, across all branches), commits, and pushes to the author's branch `users/<id>`. If the branch moved meanwhile, the local commit is rebased and verified again. Never a force push. Only then is the APK copied to `apks/<app>/users/<id>/`. Commits name the request, never its author: the app repo is public.
+8. **Branches.** A new branch starts from `main`. Improvements on `main` do not reach existing branches, except the protected core and everything outside the allowed folders (build files, dependencies), which are synced from `main` before each change (`chore(core): sync from main`). The branch keeps its own features and version number.
+9. **Also to main.** When the admin approves their own request with "También a main", it lands on `main` first and is then cherry-picked onto the admin's branch. No other request can push to `main` (checked at approval and again before the push).
+10. **Downloads.** Each user gets the latest APK of their branch, or `main`'s if they have none yet; never another user's.
+11. **Rollback.** From `/admin`, "Revertir este cambio" creates a new `git revert` commit and a new APK on that build's branch. History is never rewritten.
+12. **Restarts.** Each pushed SHA is saved on the request. A request picked up again after a restart only republishes; it never calls the AI twice.
 
 Every step is logged on the request, visible in `/admin`.
 
