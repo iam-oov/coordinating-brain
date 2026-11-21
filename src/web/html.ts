@@ -90,6 +90,7 @@ button.quiet { background:transparent; color:var(--bad); border-color:var(--bad)
 .status.review { color:var(--node-text); }
 .version { font-size:.8rem; font-weight:600; color:var(--node-text); white-space:nowrap; }
 .flag { color:var(--bad); font-size:.88rem; }
+.all-clear { display:flex; align-items:center; gap:8px; margin:16px 0; color:var(--muted); font-size:.95rem; font-weight:600; }
 .error { color:var(--bad); }
 ul.list { list-style:none; padding:0; margin:0; } ul.list > li { padding:12px 0; border-top:1px solid var(--line); }
 ul.list > li:first-child { border-top:0; }
@@ -248,7 +249,7 @@ details.changes > summary { cursor:pointer; font-weight:600; }
 .timeline .node.trunk { background:var(--fg); border-color:var(--fg); box-shadow:inset 0 0 0 3px var(--bg); }
 .timeline .meta { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:4px; }
 .timeline .when { font-size:.82rem; color:var(--muted); }
-.timeline .idea { margin:0; font-weight:600; }
+.timeline .idea { margin:0; font-weight:500; color:var(--fg); }
 .timeline .off-text { color:var(--muted); }
 .note { margin:4px 0 0; color:var(--muted); font-size:.92rem; }
 .timeline .note { font-size:.94rem; }
@@ -295,6 +296,9 @@ body.portal main { max-width:1000px; }
   .app-grid { grid-template-columns:minmax(0, 1.1fr) minmax(0, 1fr); grid-template-rows:auto 1fr;
     grid-template-areas:"version idea" "branch idea"; align-items:start; }
   .panel, .panel-empty { padding:28px; }
+}
+@media (min-width: 860px) and (min-height: 760px) {
+  .panel-idea, .idea-toggle { position:sticky; top:24px; align-self:start; }
 }
 .prose { max-width:66ch; } .prose h2 { margin-top:32px; } .prose ul { padding-left:20px; }
 .prose p, .prose li { max-width:56ch; } .prose .lead { max-width:44ch; font-size:1.15rem; }
@@ -436,6 +440,11 @@ export function fmtDay(ms: number | null): string {
 export function fmtDate(ms: number | null): string {
   if (!ms) return '';
   return new Date(ms).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+export function capitalizeFirst(text: string): string {
+  const [first = '', ...rest] = text;
+  return first.toUpperCase() + rest.join('');
 }
 
 export function fmtWhen(ms: number | null, now = Date.now()): string {

@@ -57,6 +57,7 @@ import {
   FORCED_LOG_LINE,
   STATUS_LABEL,
   USER_STATUS_LABEL,
+  capitalizeFirst,
   fmtDate,
   fmtDay,
   fmtWhen,
@@ -359,7 +360,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   }
 
   function renderPortal(req: FastifyRequest, uid: number, view: PortalView = {}) {
-    const name = getUser(db, uid)?.name ?? '';
+    const name = capitalizeFirst(getUser(db, uid)?.name ?? '');
     const apps = appsForUser(db, uid);
     const favorites = favoriteApps(db, uid);
     const current = apps.find((a) => a.slug === (view.draft?.slug ?? view.app)) ?? apps[0];
@@ -735,9 +736,10 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
               ${apps.map((a) => adminAppChip(a, favorites.has(a.slug), a.slug === appSlug, pendingBy.get(a.slug) ?? 0))}
             </ul></nav>`
           : ''}
-        <section class="card"><h2>Pending approval (${pending.length})</h2>
-          ${pending.length ? html`<ul class="list">${pending.map(adminPendingItem)}</ul>` : html`<p class="muted">Nothing pending.</p>`}
-        </section>
+        ${pending.length
+          ? html`<section class="card"><h2>Pending approval (${pending.length})</h2>
+              <ul class="list">${pending.map(adminPendingItem)}</ul></section>`
+          : html`<p class="all-clear">${ICONS.check}Nothing to approve</p>`}
         ${review.length
           ? html`<section class="card"><h2>To review (${review.length})</h2>
               <p class="muted">Forced requests that passed the sandbox tests. Read the changes before publishing them.</p>

@@ -4,8 +4,8 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { buildServer } from '../src/server.ts';
-import { addBuild, getRequest, listRequests, saveReview, upsertApp } from '../src/store.ts';
-import { FORCED_LOG_LINE, fmtWhen, newestFirst, parseLog, richText, splitRuns } from '../src/web/html.ts';
+import { addBuild, getRequest, getUser, listRequests, saveReview, upsertApp } from '../src/store.ts';
+import { FORCED_LOG_LINE, capitalizeFirst, fmtWhen, newestFirst, parseLog, richText, splitRuns } from '../src/web/html.ts';
 import { JEEP_OBD2 } from '../src/apps.ts';
 import type { App } from '../src/store.ts';
 import type { FakeGoogle, IdTokenClaims } from './helpers.ts';
@@ -264,7 +264,8 @@ test('portal: Google button, then the user sees only their apps and can download
   assert.equal(home.statusCode, 303);
   assert.equal(home.headers.location, '/apks');
   let portal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie } });
-  assert.match(portal.body, /Hi, osvaldo/);
+  assert.match(portal.body, /<p>Hi, Osvaldo<\/p>/);
+  assert.equal(getUser(s.db, 1)?.name, 'osvaldo');
   assert.match(portal.body, /Demo/);
   assert.doesNotMatch(portal.body, /Inglés/);
   assert.match(portal.body, /You don't have your version yet/);
@@ -688,4 +689,35 @@ test('admin history rows show when they finished: the time for today, the day ot
   const admin = await webLogin(s, ADMIN, '/admin');
   const history = (await s.server.inject({ method: 'GET', url: '/admin?hist=all', headers: { cookie: admin.cookie } })).body;
   assert.match(history, /by osvaldo\s*· <time datetime="2026-01-15T12:00:00\.000Z">Jan 15, 2026<\/time><\/span>/);
+});
+
+test('the greeting capitalizes only the first letter of the Google name, for display', () => {
+  assert.equal(capitalizeFirst('osvaldo'), 'Osvaldo');
+  assert.equal(capitalizeFirst('ñandú pérez'), 'Ñandú pérez');
+  assert.equal(capitalizeFirst('Ana'), 'Ana');
+  assert.equal(capitalizeFirst(''), '');
+});
+
+test('admin: an empty pending queue is one compact line, not a card', async () => {
+  const s = await setup();
+  const admin = await webLogin(s, ADMIN, '/admin');
+  const empty = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
+  assert.match(empty, /<p class="all-clear"><svg[^]*?<\/svg>Nothing to approve<\/p>/);
+  assert.doesNotMatch(empty, /Pending approval/);
+
+  await s.server.inject({ method: 'POST', url: '/api/apps/demo/requests', headers: await bearer(s, OSVALDO), payload: { text: VALID } });
+  const one = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
+  assert.match(one, /<section class="card"><h2>Pending approval \(1\)<\/h2>/);
+  assert.doesNotMatch(one, /Nothing to approve/);
+});
+
+test('portal styles: the idea panel sticks on tall desktops only, and idea titles use a lighter weight', async () => {
+  const s = await setup();
+  await login(s, OSVALDO, 'demo');
+  const { cookie } = await webLogin(s, OSVALDO);
+  const portal = (await s.server.inject({ method: 'GET', url: '/apks?app=demo', headers: { cookie } })).body;
+  assert.match(portal, /@media \(min-width: 860px\) and \(min-height: 760px\) \{\s*\.panel-idea, \.idea-toggle \{ position:sticky; top:24px; align-self:start; \}/);
+  // The sticky rule must not leak to phones, where the idea form folds behind a toggle.
+  assert.doesNotMatch(portal.replace(/@media[^{]*\{[^]*?\}\s*\}/g, ''), /position:sticky/);
+  assert.match(portal, /\.timeline \.idea \{ margin:0; font-weight:500; color:var\(--fg\); \}/);
 });
