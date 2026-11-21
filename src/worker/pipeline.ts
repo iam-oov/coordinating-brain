@@ -14,8 +14,9 @@ import {
   getUser,
   maxVersionCode,
   recordPushedSha,
+  saveReview,
 } from '../store.ts';
-import { checkDiff } from './diffGate.ts';
+import { checkDiff, gateRules } from './diffGate.ts';
 import { git, run, runShell, tail } from './exec.ts';
 import type { AgentRunner } from './runner.ts';
 import type { TestSandbox } from './sandbox.ts';
@@ -61,13 +62,19 @@ export async function processRequest(deps: PipelineDeps, req: Request): Promise<
   try {
     if (!app) throw new Stop('failed', `La app ${req.appSlug} ya no existe.`);
     const job: Job = { deps, app, req, dir, log };
-    const targets = planTargets(job);
+    const reviewFirst = req.forced && !req.reviewOk;
+    const targets = reviewFirst ? [] : planTargets(job);
     fs.mkdirSync(config.workDir, { recursive: true });
     fs.rmSync(dir, { recursive: true, force: true });
     log(`Clonando ${app.repoUrl} (${app.branch})`);
     await git(config.workDir, 'clone', '--branch', app.branch, '--single-branch', app.repoUrl, dir);
     await git(dir, 'config', 'user.name', config.gitAuthorName);
     await git(dir, 'config', 'user.email', config.gitAuthorEmail);
+
+    if (reviewFirst) {
+      await prepareReview(job);
+      return;
+    }
 
     let summary = 'Cambio implementado.';
     let firstSha = '';
@@ -97,14 +104,15 @@ function authorIsAdmin({ deps, req }: Job): boolean {
   return req.userId !== null && isAdminEmail(deps.config, getUser(deps.db, req.userId)?.email);
 }
 
-/** Main is pushed only for a revert (admin-made) or an admin's request marked "also main". */
 function mayPushMain(job: Job): boolean {
-  return job.req.kind === 'revert' || (job.req.alsoMain && authorIsAdmin(job));
+  const { req } = job;
+  return req.kind === 'revert' || (req.alsoMain && authorIsAdmin(job)) || (req.forced && req.reviewOk);
 }
 
 function planTargets(job: Job): string[] {
   const { app, req } = job;
-  const targets = req.kind === 'change' && req.alsoMain && req.branch !== app.branch ? [app.branch, req.branch] : [req.branch];
+  const toMainFirst = req.kind === 'change' && (req.alsoMain || req.forced) && req.branch !== app.branch;
+  const targets = toMainFirst ? [app.branch, req.branch] : [req.branch];
   if (targets.includes(app.branch) && !mayPushMain(job)) {
     throw new Stop('failed', `Solo una solicitud de un admin puede ir a ${app.branch}.`);
   }
@@ -124,11 +132,37 @@ async function implementOn(job: Job, branch: string): Promise<{ summary: string;
     await bumpVersion(deps.db, app, dir, log);
     const check = await verify(job);
     if (!check.ok) throw new Stop('failed', 'El código revertido no pasó la verificación.');
+  } else if (req.forced) {
+    summary = req.reason || 'Cambio forzado por el admin.';
+    await applyReviewedPatch(job);
+    await bumpVersion(deps.db, app, dir, log);
+    const check = await verify(job);
+    if (!check.ok) throw new Stop('failed', 'El cambio revisado no pasó la verificación al compilarlo.');
   } else {
-    summary = await implementWithRetries(job);
+    summary = await implementWithRetries(job, 'publish');
   }
   const sha = await commitPushPublish(job, branch, summary);
   return { summary, sha };
+}
+
+async function prepareReview(job: Job): Promise<void> {
+  const { deps, app, req, dir, log } = job;
+  await checkoutTarget(job, app.branch);
+  const summary = await implementWithRetries(job, 'review');
+  await git(dir, 'add', '-A');
+  const diff = await run('git', ['diff', '--cached', '--binary', 'HEAD'], { cwd: dir });
+  if (diff.code !== 0) throw new Error(`git diff failed: ${tail(diff.output, 500)}`);
+  saveReview(deps.db, req.id, diff.output, summary);
+  log('Pruebas aprobadas en el sandbox. Espera la revisión del diff en /admin antes de compilar y publicar.');
+}
+
+async function applyReviewedPatch({ req, dir, log }: Job): Promise<void> {
+  if (!req.reviewPatch) throw new Stop('failed', 'Falta el diff revisado.');
+  log('Aplicando el diff revisado por el admin');
+  const r = await run('git', ['apply', '--3way', '--index', '-'], { cwd: dir, input: req.reviewPatch });
+  if (r.code !== 0) {
+    throw new Stop('failed', `El diff revisado ya no aplica sobre main; fuérzala de nuevo. ${tail(r.output, 300)}`);
+  }
 }
 
 /** Brings the change already on main to the admin's own branch. Problems here never undo main. */
@@ -138,7 +172,9 @@ async function carryToBranch(job: Job, branch: string, mainSha: string): Promise
     const existed = await checkoutTarget(job, branch);
     if (!existed) {
       await pushTo(job, branch, mainSha);
-      log(`${branch} se creó desde ${app.branch}; usa el APK de ${app.branch}`);
+      const mainBuild = buildForRequest(deps.db, job.req.id, app.branch);
+      if (mainBuild) addBuild(deps.db, { ...mainBuild, branch });
+      log(`${branch} se creó desde ${app.branch} con su mismo APK`);
       return;
     }
     log(`Aplicando el cambio también a ${branch}`);
@@ -151,7 +187,9 @@ async function carryToBranch(job: Job, branch: string, mainSha: string): Promise
       await keepOurPubspec(dir);
     }
     await git(dir, 'add', '-A');
-    if ((await run('git', ['diff', '--cached', '--quiet'], { cwd: dir })).code === 0) {
+    const nothingStaged = (await run('git', ['diff', '--cached', '--quiet'], { cwd: dir })).code === 0;
+    const coreSynced = Number(await git(dir, 'rev-list', '--count', `origin/${branch}..HEAD`)) > 0;
+    if (nothingStaged && !coreSynced) {
       log(`${branch} ya tenía el cambio`);
       return;
     }
@@ -170,7 +208,11 @@ async function resumeTarget(job: Job, branch: string, sha: string): Promise<void
   const { deps, app, req, dir, log } = job;
   log(`${branch} ya tenía ${sha.slice(0, 7)}; no se vuelve a implementar`);
   if (buildForRequest(deps.db, req.id, branch)) return;
-  if (branch !== app.branch && sha === req.mainSha) return;
+  if (branch !== app.branch && sha === req.mainSha) {
+    const mainBuild = buildForRequest(deps.db, req.id, app.branch);
+    if (mainBuild) addBuild(deps.db, { ...mainBuild, branch });
+    return;
+  }
   await fetchBranch(dir, branch);
   await git(dir, 'checkout', '-q', '--detach', sha);
   const check = await verify(job);
@@ -249,18 +291,20 @@ async function keepOurPubspec(dir: string): Promise<void> {
   await git(dir, 'add', 'pubspec.yaml');
 }
 
-async function implementWithRetries(job: Job): Promise<string> {
+async function implementWithRetries(job: Job, mode: 'review' | 'publish'): Promise<string> {
   const { deps, app, req, dir, log } = job;
   let feedback: string | undefined;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    if (fs.existsSync(path.join(dir, 'pubspec.yaml'))) await git(dir, 'checkout', 'HEAD', '--', 'pubspec.yaml');
+    if (mode === 'publish' && fs.existsSync(path.join(dir, 'pubspec.yaml'))) {
+      await git(dir, 'checkout', 'HEAD', '--', 'pubspec.yaml');
+    }
 
     log(`Intento ${attempt}/${MAX_ATTEMPTS}: Claude implementa la solicitud`);
     const out = await deps.runner.implement({ cwd: dir, app, request: req, attempt, feedback });
     if (out.costUsd !== undefined) log(`Costo del intento: $${out.costUsd.toFixed(3)}`);
     if (out.refused) throw new Stop('discarded', `La IA no la implementó: ${out.refused}`);
 
-    const gate = await checkDiff(dir, app.allowedPaths, app.protectedPaths);
+    const gate = await checkDiff(dir, gateRules(app, req.forced));
     log(`Diff: ${gate.files.length} archivos, +${gate.added}/-${gate.removed}`);
     if (gate.files.length === 0) {
       feedback = 'You did not change any file. Implement the request, or refuse it with RECHAZO: and a reason.';
@@ -275,8 +319,8 @@ async function implementWithRetries(job: Job): Promise<string> {
       continue;
     }
 
-    await bumpVersion(deps.db, app, dir, log);
-    const check = await verify(job);
+    if (mode === 'publish') await bumpVersion(deps.db, app, dir, log);
+    const check = await verify(job, mode === 'publish');
     if (check.ok) return out.summary || 'Cambio implementado.';
     feedback = check.feedback;
   }
@@ -296,11 +340,11 @@ async function prepareRevert(dir: string, req: Request, log: (l: string) => void
 }
 
 /** Prepare and build are trusted app config; the tests run the AI's code, so they go to the sandbox. */
-async function verify({ deps, app, dir, log }: Job): Promise<{ ok: true } | { ok: false; feedback: string }> {
+async function verify({ deps, app, dir, log }: Job, build = true): Promise<{ ok: true } | { ok: false; feedback: string }> {
   const steps = [
     ['Preparación', app.prepareCmd, false],
     ['Pruebas', app.testCmd, true],
-    ['Compilación', app.buildCmd, false],
+    ['Compilación', build ? app.buildCmd : '', false],
   ] as const;
   for (const [name, cmd, sandboxed] of steps) {
     if (!cmd) continue;
@@ -313,7 +357,7 @@ async function verify({ deps, app, dir, log }: Job): Promise<{ ok: true } | { ok
       return { ok: false, feedback: `${name} failed:\n${tail(r.output, 8000)}` };
     }
   }
-  if (!fs.existsSync(path.join(dir, app.apkPath))) {
+  if (build && !fs.existsSync(path.join(dir, app.apkPath))) {
     return { ok: false, feedback: `The build did not produce ${app.apkPath}.` };
   }
   return { ok: true };

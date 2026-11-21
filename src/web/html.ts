@@ -89,6 +89,7 @@ export const STATUS_LABEL: Record<string, string> = {
   approved: 'En cola',
   rejected: 'Rechazada',
   running: 'Implementando',
+  review: 'Por revisar',
   built: 'Lista',
   failed: 'Falló',
   discarded: 'Descartada',

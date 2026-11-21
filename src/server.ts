@@ -24,11 +24,14 @@ import type { GoogleAuth, GoogleIdentity } from './google.ts';
 import { authorizeUrl } from './google.ts';
 import type { App, Build, Request } from './store.ts';
 import {
+  appendLog,
   appsForUser,
   buildForRequest,
   createRequest,
   createRevertRequest,
   decideRequest,
+  decideReview,
+  forceRequest,
   getApp,
   getBuild,
   getRequest,
@@ -222,7 +225,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     if (uid === null) return reply;
     const a = allowedApp(uid, req.params.slug, reply);
     if (!a) return reply;
-    if (!latestBuildFor(db, a, uid)) return reply.code(404).send({ error: 'Todavía no hay un APK de esta app.' });
+    if (!latestBuildFor(db, a, uid)) return reply.code(404).send({ error: 'Todavía no tienes una versión propia de esta app.' });
     const token = createDownloadToken(db, uid, req.params.slug);
     return { url: `${config.publicUrl}/apks/${req.params.slug}/latest.apk?dl=${token}` };
   });
@@ -244,7 +247,10 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
       html`
         <div class="row" style="justify-content:space-between">
           <div><h1>Tus apps</h1><div class="muted">Hola, ${name}.</div></div>
-          <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
+          <div class="row">
+            ${isAdmin(req) ? html`<a class="button" href="/admin">Admin</a>` : ''}
+            <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
+          </div>
         </div>
         ${apps.length === 0 ? html`<div class="card">Tu cuenta todavía no tiene apps asignadas.</div>` : ''}
         <p class="muted">Tus solicitudes y tu versión de cada app son públicas en GitHub.</p>
@@ -262,7 +268,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
         ${b
           ? html`<p><a class="button" href="/apks/${a.slug}/latest.apk">Descargar APK v${b.versionCode}</a>
               <span class="muted">· ${fmtDate(b.createdAt)} · ${b.commitSha.slice(0, 7)}</span></p>`
-          : html`<p class="muted">Todavía no hay un APK de esta app.</p>`}
+          : html`<p class="muted">Todavía no tienes una versión propia de ${a.name}. Envía una solicitud y, cuando se publique, podrás descargarla aquí.</p>`}
         <form method="post" action="/apks/${a.slug}/requests">
           <textarea name="text" rows="2" minlength="${MIN_LENGTH}" maxlength="${MAX_LENGTH}"
             placeholder="¿Qué mejorarías de ${a.name}?" required></textarea>
@@ -340,7 +346,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     const a = getApp(db, slug);
     if (uid === null || !a || !userCanUseApp(db, uid, slug)) return reply.code(404).send('No encontrado');
     const b = latestBuildFor(db, a, uid);
-    if (!b) return reply.code(404).send('Todavía no hay un APK de esta app.');
+    if (!b) return reply.code(404).send('Todavía no tienes una versión propia de esta app.');
     const file = path.join(config.apksDir, slug, b.apkFile);
     if (!fs.existsSync(file)) return reply.code(404).send('El archivo del APK no está en el servidor.');
     reply
@@ -369,18 +375,27 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     }
     const all = listRequests(db, { limit: 60 });
     const pending = all.filter((r) => r.status === 'pending');
+    const review = all.filter((r) => r.status === 'review');
     const queue = all.filter((r) => r.status === 'approved' || r.status === 'running');
-    const done = all.filter((r) => !['pending', 'approved', 'running'].includes(r.status));
+    const done = all.filter((r) => !['pending', 'approved', 'running', 'review'].includes(r.status));
     return page(
       'Cerebro · admin',
       html`
         <div class="row" style="justify-content:space-between">
           <h1>Cerebro · admin</h1>
-          <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
+          <div class="row">
+            <a class="button" href="/apks">Mis APKs</a>
+            <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
+          </div>
         </div>
         <section class="card"><h2>Por aprobar (${pending.length})</h2>
           ${pending.length ? html`<ul class="list">${pending.map(adminPendingItem)}</ul>` : html`<p class="muted">Nada pendiente.</p>`}
         </section>
+        ${review.length
+          ? html`<section class="card"><h2>Por revisar (${review.length})</h2>
+              <p class="muted">Solicitudes forzadas: pasaron las pruebas en el sandbox. Lee el diff antes de compilar y publicar.</p>
+              <ul class="list">${review.map(adminReviewItem)}</ul></section>`
+          : ''}
         <section class="card"><h2>En cola / implementando (${queue.length})</h2>
           ${queue.length ? html`<ul class="list">${queue.map((r) => adminHistoryItem(r, true))}</ul>` : html`<p class="muted">Vacía.</p>`}
         </section>
@@ -417,6 +432,20 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     </li>`;
   }
 
+  function adminReviewItem(r: Request) {
+    return html`<li>
+      <div><strong>#${r.id}</strong> ${r.appSlug} · ${r.userName ?? 'sistema'} · <span class="muted">main + ${r.branch}</span></div>
+      <p>${r.text}</p>
+      ${r.reason ? html`<p class="muted">${r.reason}</p>` : ''}
+      <details open><summary>Diff</summary><pre style="max-height:480px">${r.reviewPatch ?? ''}</pre></details>
+      ${r.log ? html`<details><summary class="muted">Log</summary><pre>${r.log}</pre></details>` : ''}
+      <div class="row">
+        <form method="post" action="/admin/requests/${r.id}/publish"><button>Publicar</button></form>
+        <form method="post" action="/admin/requests/${r.id}/discard"><button class="danger">Descartar</button></form>
+      </div>
+    </li>`;
+  }
+
   function adminHistoryItem(r: Request, openLog = false) {
     return html`<li>
       <div class="row" style="justify-content:space-between">
@@ -426,6 +455,12 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
       <div>${r.text}</div>
       ${r.reason ? html`<div class="muted">${r.reason}</div>` : ''}
       ${r.log ? html`<details ${openLog ? 'open' : ''}><summary class="muted">Log</summary><pre>${r.log}</pre></details>` : ''}
+      ${r.kind === 'change' && (r.status === 'failed' || r.status === 'discarded')
+        ? html`<form method="post" action="/admin/requests/${r.id}/force" class="row">
+            <button class="secondary">Forzar</button>
+            <span class="muted">Desbloquea el núcleo, dependencias y permisos de Android. Va a main y pide revisar el diff antes de publicar.</span>
+          </form>`
+        : ''}
     </li>`;
   }
 
@@ -463,6 +498,28 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     if (!isAdmin(req)) return reply.code(403).send('Prohibido');
     const reason = String((req.body as { reason?: unknown } | undefined)?.reason ?? '').trim();
     decideRequest(db, Number(req.params.id), { approve: false, reason: reason || null });
+    return reply.redirect('/admin', 303);
+  });
+
+  app.post<{ Params: { id: string } }>('/admin/requests/:id/force', async (req, reply) => {
+    if (!isAdmin(req)) return reply.code(403).send('Prohibido');
+    const id = Number(req.params.id);
+    if (forceRequest(db, id)) {
+      appendLog(db, id, 'Forzada por el admin: núcleo, dependencias y permisos de Android desbloqueados; pide revisión antes de publicar');
+      wakeWorker?.();
+    }
+    return reply.redirect('/admin', 303);
+  });
+
+  app.post<{ Params: { id: string } }>('/admin/requests/:id/publish', async (req, reply) => {
+    if (!isAdmin(req)) return reply.code(403).send('Prohibido');
+    if (decideReview(db, Number(req.params.id), true)) wakeWorker?.();
+    return reply.redirect('/admin', 303);
+  });
+
+  app.post<{ Params: { id: string } }>('/admin/requests/:id/discard', async (req, reply) => {
+    if (!isAdmin(req)) return reply.code(403).send('Prohibido');
+    decideReview(db, Number(req.params.id), false);
     return reply.redirect('/admin', 303);
   });
 

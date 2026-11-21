@@ -22,6 +22,7 @@ export type RequestStatus =
   | 'approved' // queued for the worker
   | 'rejected' // the admin said no
   | 'running'
+  | 'review'
   | 'built' // committed, pushed and APK published
   | 'failed' // could not be built or verified
   | 'discarded'; // the AI or a check refused it
@@ -38,6 +39,9 @@ export interface Request {
   alsoMain: boolean;
   mainSha: string | null;
   branchSha: string | null;
+  forced: boolean;
+  reviewOk: boolean;
+  reviewPatch: string | null;
   status: RequestStatus;
   flags: string[];
   reason: string | null;
@@ -248,6 +252,9 @@ type RequestRow = {
   also_main: number;
   main_sha: string | null;
   branch_sha: string | null;
+  forced: number;
+  review_ok: number;
+  review_patch: string | null;
   status: RequestStatus;
   flags: string | null;
   reason: string | null;
@@ -273,6 +280,9 @@ function toRequest(r: RequestRow): Request {
     alsoMain: r.also_main === 1,
     mainSha: r.main_sha,
     branchSha: r.branch_sha,
+    forced: r.forced === 1,
+    reviewOk: r.review_ok === 1,
+    reviewPatch: r.review_patch,
     status: r.status,
     flags: r.flags ? (JSON.parse(r.flags) as string[]) : [],
     reason: r.reason,
@@ -359,6 +369,37 @@ export function decideRequest(db: Db, id: number, d: Decision): boolean {
       `UPDATE requests SET status = ?, reason = ?, also_main = ?, decided_at = ? WHERE id = ? AND status = 'pending'`,
     )
     .run(d.approve ? 'approved' : 'rejected', d.reason ?? null, d.approve && d.alsoMain ? 1 : 0, d.now ?? Date.now(), id);
+  return res.changes === 1;
+}
+
+export function forceRequest(db: Db, id: number, now = Date.now()): boolean {
+  const res = db
+    .prepare(
+      `UPDATE requests SET status = 'approved', forced = 1, review_ok = 0, review_patch = NULL, main_sha = NULL,
+         branch_sha = NULL, reason = NULL, decided_at = ?, started_at = NULL, finished_at = NULL
+       WHERE id = ? AND kind = 'change' AND status IN ('failed', 'discarded')`,
+    )
+    .run(now, id);
+  return res.changes === 1;
+}
+
+export function saveReview(db: Db, id: number, patch: string, summary: string, now = Date.now()): void {
+  db.prepare(`UPDATE requests SET status = 'review', review_patch = ?, reason = ?, finished_at = ? WHERE id = ?`).run(
+    patch,
+    summary,
+    now,
+    id,
+  );
+}
+
+export function decideReview(db: Db, id: number, publish: boolean, now = Date.now()): boolean {
+  const res = publish
+    ? db
+        .prepare(`UPDATE requests SET status = 'approved', review_ok = 1, decided_at = ?, finished_at = NULL WHERE id = ? AND status = 'review'`)
+        .run(now, id)
+    : db
+        .prepare(`UPDATE requests SET status = 'discarded', reason = 'Descartada en la revisión del admin.', finished_at = ? WHERE id = ? AND status = 'review'`)
+        .run(now, id);
   return res.changes === 1;
 }
 
@@ -469,9 +510,8 @@ export function latestBuildOn(db: Db, appSlug: string, branch: string): Build | 
   return r ? toBuild(r) : null;
 }
 
-/** The user's own version if it has one, else the app's main version. Never another user's. */
 export function latestBuildFor(db: Db, app: App, uid: number): Build | null {
-  return latestBuildOn(db, app.slug, userBranch(uid)) ?? latestBuildOn(db, app.slug, app.branch);
+  return latestBuildOn(db, app.slug, userBranch(uid));
 }
 
 export function getBuild(db: Db, id: number): Build | null {

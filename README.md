@@ -28,7 +28,8 @@ Inspired by [midudev/tuweb.dev](https://github.com/midudev/tuweb.dev), taken fro
 9. **Also to main.** When the admin approves their own request with "También a main", it lands on `main` first and is then cherry-picked onto the admin's branch. No other request can push to `main` (checked at approval and again before the push).
 10. **Downloads.** Each user gets the latest APK of their branch, or `main`'s if they have none yet; never another user's.
 11. **Rollback.** From `/admin`, "Revertir este cambio" creates a new `git revert` commit and a new APK on that build's branch. History is never rewritten.
-12. **Restarts.** Each pushed SHA is saved on the request. A request picked up again after a restart only republishes; it never calls the AI twice.
+12. **Forcing.** The admin can force a failed or discarded request from `/admin`. It runs again with the protected core, new dependencies in `pubspec.yaml` and permissions in `AndroidManifest.xml` unlocked (Gradle, signing, CI and keys stay locked; tests still run in the sandbox). It lands on `main` first. Because a new dependency's Gradle code runs in the build, outside the sandbox, a forced request stops at **Por revisar** after its tests: the admin reads the diff and only then publishes it (the exact reviewed diff is applied, the AI is not called again) or discards it.
+13. **Restarts.** Each pushed SHA is saved on the request. A request picked up again after a restart only republishes; it never calls the AI twice.
 
 Every step is logged on the request, visible in `/admin`.
 

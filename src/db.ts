@@ -119,6 +119,12 @@ CREATE TABLE oauth_states (
 );
 `;
 
+const FORCED_REQUESTS = `
+ALTER TABLE requests ADD COLUMN forced       INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN review_ok    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN review_patch TEXT;
+`;
+
 interface Migration {
   sql: string;
   rebuildsTables: boolean;
@@ -127,6 +133,7 @@ interface Migration {
 const MIGRATIONS: Migration[] = [
   { sql: SCHEMA, rebuildsTables: false },
   { sql: GOOGLE_AUTH_AND_BRANCHES, rebuildsTables: true },
+  { sql: FORCED_REQUESTS, rebuildsTables: false },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

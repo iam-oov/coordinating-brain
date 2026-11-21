@@ -4,7 +4,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { buildServer } from '../src/server.ts';
-import { addBuild, getRequest, listRequests, upsertApp } from '../src/store.ts';
+import { addBuild, getRequest, listRequests, saveReview, upsertApp } from '../src/store.ts';
 import type { App } from '../src/store.ts';
 import type { FakeGoogle, IdTokenClaims } from './helpers.ts';
 import { ADMIN_EMAIL, fakeGoogle, makeRemoteApp, testSetup } from './helpers.ts';
@@ -216,8 +216,12 @@ test('admin: only ADMIN_EMAILS get in; approving wakes the worker; rejecting wor
   const forbidden = await s.server.inject({ method: 'POST', url: `/admin/requests/${id}/reject`, headers: { cookie: user.cookie } });
   assert.equal(forbidden.statusCode, 403);
 
+  const userPortal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie: user.cookie } });
+  assert.doesNotMatch(userPortal.body, /href="\/admin"/);
   const admin = await webLogin(s, ADMIN, '/admin');
   assert.equal(admin.callback.headers.location, '/admin');
+  const adminPortal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie: admin.cookie } });
+  assert.match(adminPortal.body, /href="\/admin"/);
   const panel = await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } });
   assert.match(panel.body, /Por aprobar \(1\)/);
   assert.match(panel.body, /Agregar un botón para compartir/);
@@ -252,9 +256,9 @@ test('portal: Google button, then the user sees only their apps and can download
   assert.match(portal.body, /Hola, osvaldo/);
   assert.match(portal.body, /Demo/);
   assert.doesNotMatch(portal.body, /Inglés/);
-  assert.match(portal.body, /Todavía no hay un APK/);
+  assert.match(portal.body, /Todavía no tienes una versión propia/);
 
-  publishBuild(s, 7, 'abcdef1234', 'APKDATA');
+  publishBuild(s, 7, 'abcdef1234', 'APKDATA', 'users/1');
   portal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie } });
   assert.match(portal.body, /Descargar APK v7/);
   const apk = await s.server.inject({ method: 'GET', url: '/apks/demo/latest.apk', headers: { cookie } });
@@ -277,7 +281,7 @@ test('download link from the app works once', async () => {
   const none = await s.server.inject({ method: 'POST', url: '/api/apps/demo/download-link', headers: auth });
   assert.equal(none.statusCode, 404);
 
-  publishBuild(s, 2, '1234567890', 'APK2');
+  publishBuild(s, 2, '1234567890', 'APK2', 'users/1');
   const link = await s.server.inject({ method: 'POST', url: '/api/apps/demo/download-link', headers: auth });
   const url = new URL((link.json() as { url: string }).url);
   assert.equal(url.origin, 'https://cerebro.example.test');
@@ -328,7 +332,7 @@ test('"También a main" is offered and stored only for an admin\'s own request',
   assert.equal(getRequest(s.db, mine.id)?.alsoMain, true);
 });
 
-test('downloads: your own build, else main\'s; never another user\'s', async () => {
+test('downloads: only your own build; a new user gets none, not main\'s or another user\'s', async () => {
   const s = await setup();
   const osvaldo = await bearer(s, OSVALDO);
   const ana = await bearer(s, ANA);
@@ -339,8 +343,44 @@ test('downloads: your own build, else main\'s; never another user\'s', async () 
     (await s.server.inject({ method: 'POST', url: '/api/apps/demo/download-link', headers })).json().url as string;
   const fetchApk = async (url: string) => (await s.server.inject({ method: 'GET', url: url.replace(s.config.publicUrl, '') })).body;
   assert.equal(await fetchApk(await link(osvaldo)), 'osvaldo-apk');
-  assert.equal(await fetchApk(await link(ana)), 'main-apk');
+  const anaLink = await s.server.inject({ method: 'POST', url: '/api/apps/demo/download-link', headers: ana });
+  assert.equal(anaLink.statusCode, 404);
+  assert.match(anaLink.json().error, /versión propia/);
 
   const apps = (await s.server.inject({ method: 'GET', url: '/api/apps', headers: ana })).json().apps;
-  assert.equal(apps[0].latest.versionCode, 1);
+  assert.equal(apps[0].latest, null);
+  const anaWeb = await webLogin(s, ANA);
+  const portal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie: anaWeb.cookie } });
+  assert.match(portal.body, /Todavía no tienes una versión propia/);
+  assert.equal((await s.server.inject({ method: 'GET', url: '/apks/demo/latest.apk', headers: { cookie: anaWeb.cookie } })).statusCode, 404);
+});
+
+test('admin can force a discarded request, then publish or discard it after reading the diff', async () => {
+  const s = await setup();
+  await s.server.inject({ method: 'POST', url: '/api/apps/demo/requests', headers: await bearer(s, OSVALDO), payload: { text: VALID } });
+  const id = listRequests(s.db)[0].id;
+  s.db.prepare(`UPDATE requests SET status = 'discarded', reason = 'Toca el núcleo.' WHERE id = ?`).run(id);
+
+  const user = await webLogin(s, OSVALDO, '/admin');
+  assert.equal((await s.server.inject({ method: 'POST', url: `/admin/requests/${id}/force`, headers: { cookie: user.cookie } })).statusCode, 403);
+
+  const admin = await webLogin(s, ADMIN, '/admin');
+  const get = async () => (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
+  assert.match(await get(), new RegExp(`/admin/requests/${id}/force`));
+  await s.server.inject({ method: 'POST', url: `/admin/requests/${id}/force`, headers: { cookie: admin.cookie } });
+  const forced = getRequest(s.db, id)!;
+  assert.equal(forced.status, 'approved');
+  assert.equal(forced.forced, true);
+  assert.match(forced.log, /Forzada por el admin/);
+  assert.equal(s.wakes(), 1);
+
+  saveReview(s.db, id, '+<script>alert(1)</script>\n', 'Agregué el micrófono.');
+  const panel = await get();
+  assert.match(panel, /Por revisar \(1\)/);
+  assert.match(panel, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(panel, /<script>alert/);
+  await s.server.inject({ method: 'POST', url: `/admin/requests/${id}/publish`, headers: { cookie: admin.cookie } });
+  assert.equal(getRequest(s.db, id)?.status, 'approved');
+  assert.equal(getRequest(s.db, id)?.reviewOk, true);
+  assert.equal(s.wakes(), 2);
 });

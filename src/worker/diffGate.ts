@@ -34,6 +34,21 @@ export const FORBIDDEN_LINES: { label: string; pattern: RegExp }[] = [
 
 export const DEFAULT_MAX_LINES = 800;
 
+export const FORCED_EXTRA_FILES = ['pubspec.yaml', 'android/app/src/main/AndroidManifest.xml'];
+
+export interface GateRules {
+  allowedPaths: string[];
+  protectedPaths?: string[];
+  extraFiles?: string[];
+  maxLines?: number;
+}
+
+export function gateRules(app: { allowedPaths: string[]; protectedPaths: string[] }, forced: boolean): GateRules {
+  return forced
+    ? { allowedPaths: app.allowedPaths, extraFiles: FORCED_EXTRA_FILES }
+    : { allowedPaths: app.allowedPaths, protectedPaths: app.protectedPaths };
+}
+
 export interface GateResult {
   ok: boolean;
   problems: string[];
@@ -47,12 +62,8 @@ export function isProtected(file: string, protectedPaths: string[]): boolean {
 }
 
 /** Stages everything in [cwd] and checks the staged diff against HEAD. */
-export async function checkDiff(
-  cwd: string,
-  allowedPaths: string[],
-  protectedPaths: string[] = [],
-  maxLines = DEFAULT_MAX_LINES,
-): Promise<GateResult> {
+export async function checkDiff(cwd: string, rules: GateRules): Promise<GateResult> {
+  const { allowedPaths, protectedPaths = [], extraFiles = [], maxLines = DEFAULT_MAX_LINES } = rules;
   await git(cwd, 'add', '-A');
   const numstat = await git(cwd, 'diff', '--cached', '--numstat', '--no-renames');
   const problems: string[] = [];
@@ -69,6 +80,7 @@ export async function checkDiff(
     }
     added += Number(a);
     removed += Number(r);
+    if (extraFiles.includes(file)) continue;
     if (ALWAYS_FORBIDDEN.some((p) => p.test(file))) problems.push(`${file}: archivo protegido`);
     else if (isProtected(file, protectedPaths)) problems.push(`${file}: núcleo protegido, no se puede cambiar`);
     else if (!allowedPaths.some((p) => file.startsWith(p))) {

@@ -9,6 +9,8 @@ import {
   createRequest,
   createRevertRequest,
   decideRequest,
+  decideReview,
+  forceRequest,
   getRequest,
   importBuild,
   latestBuild,
@@ -264,13 +266,16 @@ test('also main (admin): main first, then carried to the admin branch, two APKs 
   assert.equal(latestBuildOn(s.db, s.app.slug, 'users/1')!.versionCode, 6);
 });
 
-test('also main (admin) without a branch yet: the branch starts at main and uses its APK', async () => {
+test('also main (admin) without a branch yet: the branch starts at main with the same APK as its own', async () => {
   const s = setup('Agregar un botón para compartir el código', ADMIN_EMAIL, true);
   const r = await run(s, new FakeRunner([writes({ 'lib/share.dart': '// share\n' })]));
   assert.equal(r.status, 'built', r.log);
   assert.equal(sh(s.remote, 'git', 'rev-parse', 'users/1'), sh(s.remote, 'git', 'rev-parse', 'main'));
-  assert.equal(latestBuildOn(s.db, s.app.slug, 'users/1'), null);
-  assert.equal(latestBuildFor(s.db, s.app, 1)!.branch, 'main');
+  const mainBuild = latestBuildOn(s.db, s.app.slug, 'main')!;
+  const own = latestBuildFor(s.db, s.app, 1)!;
+  assert.equal(own.branch, 'users/1');
+  assert.equal(own.apkFile, mainBuild.apkFile);
+  assert.equal(own.versionCode, mainBuild.versionCode);
 });
 
 test('also main forced on a non-admin request: fails before the AI runs, main untouched', async () => {
@@ -295,12 +300,79 @@ test('a request picked up again after a restart republishes without calling the 
   assert.equal(latestBuildOn(s.db, s.app.slug, 'users/1')!.commitSha, r.branchSha);
 });
 
-test('each user gets their own build, or main\'s; never another user\'s', async () => {
+test('each user gets only their own build: never main\'s, never another user\'s', async () => {
   const s = setup();
   createTestUser(s.db, 'ana', 'ana@example.test', [s.app.slug]);
   importBuild(s.db, { appSlug: s.app.slug, branch: 'main', versionCode: 1, apkFile: 'demo-v1.apk', commitSha: 'aaaaaaa' });
   await run(s, new FakeRunner([writes({ 'lib/welcome.dart': '// hola\n' })]));
   assert.equal(latestBuildFor(s.db, s.app, 1)!.branch, 'users/1');
-  assert.equal(latestBuildFor(s.db, s.app, 2)!.branch, 'main');
+  assert.equal(latestBuildFor(s.db, s.app, 2), null);
   assert.equal(latestBuild(s.db, s.app.slug)!.branch, 'users/1');
+});
+
+async function forcedToReview(s: ReturnType<typeof setup>) {
+  await run(s, new FakeRunner([() => ({ refused: 'Toca el núcleo protegido.', summary: '' })]));
+  assert.ok(forceRequest(s.db, s.req.id));
+  const forced = claimNextApproved(s.db)!;
+  const runner = new FakeRunner([
+    writes(
+      {
+        'lib/core/mic.dart': '// mic in the core\n',
+        'pubspec.yaml': 'name: demo\nversion: 1.0.0+1\n\nenvironment:\n  sdk: ^3.0.0\ndependencies:\n  speech_to_text: ^7.0.0\n',
+      },
+      'Agregué el micrófono al buzón.',
+    ),
+  ]);
+  return { forced, runner, r: await run(s, runner, forced) };
+}
+
+test('forced: a discarded request is implemented with the core unlocked and stops for review, nothing pushed', async () => {
+  const s = setup('Agregar un botón de micrófono en el buzón');
+  const { runner, r } = await forcedToReview(s);
+  assert.equal(r.status, 'review', r.log);
+  assert.equal(runner.calls[0].request.forced, true);
+  assert.match(r.reviewPatch ?? '', /lib\/core\/mic\.dart/);
+  assert.match(r.reviewPatch ?? '', /speech_to_text/);
+  assert.doesNotMatch(r.reviewPatch ?? '', /version: 1\.0\.0\+2/);
+  assert.equal(r.reason, 'Agregué el micrófono al buzón.');
+  assert.deepEqual(remoteBranches(s.remote), ['main']);
+  assert.equal(latestBuild(s.db, s.app.slug), null);
+});
+
+test('forced: after the review it publishes the reviewed diff to main and the author branch without the AI', async () => {
+  const s = setup('Agregar un botón de micrófono en el buzón');
+  pushToRemote(s.remote, 'users/1', { 'lib/mine.dart': '// mine\n' });
+  await forcedToReview(s);
+  assert.ok(decideReview(s.db, s.req.id, true));
+  const runner = new FakeRunner([]);
+  const r = await run(s, runner, claimNextApproved(s.db)!);
+  assert.equal(r.status, 'built', r.log);
+  assert.equal(runner.calls.length, 0);
+
+  const main = remoteState(s.remote);
+  assert.equal(main.read('lib/core/mic.dart'), '// mic in the core\n');
+  assert.match(main.pubspec, /speech_to_text/);
+  assert.match(main.pubspec, /version: 1\.0\.0\+2/);
+  const mine = remoteState(s.remote, 'users/1');
+  assert.equal(mine.read('lib/core/mic.dart'), '// mic in the core\n');
+  assert.match(mine.pubspec, /speech_to_text/);
+  assert.ok(mine.files.includes('lib/mine.dart'));
+  assert.equal(latestBuildOn(s.db, s.app.slug, 'main')!.versionCode, 2);
+  assert.equal(latestBuildOn(s.db, s.app.slug, 'users/1')!.versionCode, 3);
+});
+
+test('forced: discarded at review never reaches the repo; a stale diff fails instead of guessing', async () => {
+  const s = setup('Agregar un botón de micrófono en el buzón');
+  await forcedToReview(s);
+  assert.ok(decideReview(s.db, s.req.id, false));
+  assert.equal(getRequest(s.db, s.req.id)?.status, 'discarded');
+  assert.deepEqual(remoteBranches(s.remote), ['main']);
+
+  assert.ok(forceRequest(s.db, s.req.id));
+  await run(s, new FakeRunner([writes({ 'lib/core/auth.dart': 'const signIn = 3;\n' })]), claimNextApproved(s.db)!);
+  pushToRemote(s.remote, 'main', { 'lib/core/auth.dart': 'const signIn = 4;\n' });
+  assert.ok(decideReview(s.db, s.req.id, true));
+  const r = await run(s, new FakeRunner([]), claimNextApproved(s.db)!);
+  assert.equal(r.status, 'failed');
+  assert.match(r.reason ?? '', /ya no aplica/);
 });

@@ -50,6 +50,13 @@ test('the request is fenced as data and the rules forbid shell, network and prot
   assert.match(sys, /RECHAZO:/);
   const user = userPrompt({ cwd: '.', app, request, attempt: 1 });
   assert.match(user, /<solicitud>\nCambiar el color del botón principal a verde\n<\/solicitud>/);
+  assert.match(sys, /Do not add dependencies/);
+  const forced = systemPrompt(app, true);
+  assert.match(forced, /explicitly approved/);
+  assert.match(forced, /including the protected core \(lib\/core\/\)/);
+  assert.match(forced, /AndroidManifest\.xml only to add permissions/);
+  assert.match(forced, /Never touch Gradle files/);
+  assert.doesNotMatch(forced, /Do not add dependencies/);
   const retry = userPrompt({ cwd: '.', app, request, attempt: 2, feedback: 'error: x' });
   assert.match(retry, /<salida>\nerror: x\n<\/salida>/);
 });
