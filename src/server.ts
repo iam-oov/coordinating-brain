@@ -38,15 +38,20 @@ import {
   getUser,
   grantApps,
   latestBuildFor,
+  latestBuildOn,
   listApps,
   listBuilds,
   listRequests,
   upsertGoogleUser,
+  userBranch,
   userCanUseApp,
 } from './store.ts';
-import { STATUS_LABEL, fmtDate, html, page } from './web/html.ts';
+import { appPage } from './web/catalog.ts';
+import { STATUS_LABEL, USER_STATUS_LABEL, fmtDate, html, page, renderDiff } from './web/html.ts';
+import { BRAND_MARK, appDetailPage, footer, landingPage, privacyPage, signInButton } from './web/landing.ts';
 import { MAX_LENGTH, MIN_LENGTH } from './worker/moderation.ts';
 
+const FONTS_DIR = path.join(import.meta.dirname, '..', 'public', 'fonts');
 const SESSION_COOKIE = 'cb_session';
 const OAUTH_COOKIE = 'cb_oauth';
 const OAUTH_COOKIE_PATH = '/auth/google';
@@ -97,7 +102,7 @@ function requestJson(db: Db, r: Request) {
     kind: r.kind,
     text: r.text,
     status: r.status,
-    statusLabel: STATUS_LABEL[r.status] ?? r.status,
+    statusLabel: USER_STATUS_LABEL[r.status] ?? r.status,
     reason: r.reason,
     createdAt: r.createdAt,
     finishedAt: r.finishedAt,
@@ -125,7 +130,41 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   });
 
   app.get('/health', async () => ({ ok: true }));
-  app.get('/', async (_req, reply) => reply.redirect('/apks'));
+
+  const FONT_FILES = new Set(['bricolage-grotesque-latin.woff2', 'bricolage-grotesque-latin-ext.woff2']);
+  app.get<{ Params: { file: string } }>('/fonts/:file', async (req, reply) => {
+    if (!FONT_FILES.has(req.params.file)) return reply.code(404).send('No encontrado');
+    reply.type('font/woff2').header('cache-control', 'public, max-age=31536000, immutable');
+    return reply.send(fs.createReadStream(path.join(FONTS_DIR, req.params.file)));
+  });
+  app.get('/', async (req, reply) => {
+    if (portalUser(req) !== null) return reply.redirect('/apks', 303);
+    return reply.type('text/html; charset=utf-8').send(page('Cerebro', landingPage(google !== undefined), { bodyClass: 'landing' }));
+  });
+
+  app.get('/privacidad', async (_req, reply) =>
+    reply.type('text/html; charset=utf-8').send(page('Cerebro · Privacidad', privacyPage(google !== undefined), { bodyClass: 'landing' })),
+  );
+
+  app.get<{ Params: { slug: string } }>('/apps/:slug', async (req, reply) => {
+    const info = appPage(req.params.slug);
+    const a = getApp(db, req.params.slug);
+    if (!info || !a) return reply.code(404).type('text/html; charset=utf-8').send(page('Cerebro', html`<div class="card">Esa app no existe. <a href="/">Volver</a></div>`));
+    const hasBuild = !!latestBuildOn(db, a.slug, a.branch);
+    return reply.type('text/html; charset=utf-8').send(page(`${info.name} · Cerebro`, appDetailPage(info, hasBuild, google !== undefined), { bodyClass: 'landing' }));
+  });
+
+  app.get<{ Params: { slug: string } }>('/apps/:slug/apk', async (req, reply) => {
+    const a = getApp(db, req.params.slug);
+    const b = a && appPage(a.slug) ? latestBuildOn(db, a.slug, a.branch) : null;
+    const file = a && b ? path.join(config.apksDir, a.slug, b.apkFile) : '';
+    if (!a || !b || !fs.existsSync(file)) return reply.code(404).send('Todavía no hay un APK publicado de esta app.');
+    reply
+      .type('application/vnd.android.package-archive')
+      .header('content-disposition', `attachment; filename="${a.slug}.apk"`)
+      .header('cache-control', 'no-store');
+    return reply.send(fs.createReadStream(file));
+  });
 
   /** User id from the API bearer token, or a 401. */
   function apiUser(req: FastifyRequest, reply: FastifyReply): number | null {
@@ -236,50 +275,93 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return getSession(db, cookies(req)[SESSION_COOKIE])?.userId ?? null;
   }
 
-  app.get('/apks', async (req, reply) => {
-    reply.type('text/html; charset=utf-8');
-    const uid = portalUser(req);
-    if (uid === null) return page('Cerebro · APKs', loginPage('Cerebro', '/apks', google !== undefined));
+  interface Draft {
+    slug: string;
+    text: string;
+    error: string;
+  }
+
+  function renderPortal(req: FastifyRequest, uid: number, notice: { sentTo?: string; draft?: Draft } = {}) {
     const name = getUser(db, uid)?.name ?? '';
     const apps = appsForUser(db, uid);
+    const sentTo = notice.sentTo ? apps.find((a) => a.slug === notice.sentTo) : undefined;
     return page(
-      'Cerebro · APKs',
+      'Cerebro · Tus apps',
       html`
-        <div class="row" style="justify-content:space-between">
-          <div><h1>Tus apps</h1><div class="muted">Hola, ${name}.</div></div>
+        <header class="topbar">
+          <a class="brand" href="/apks">${BRAND_MARK}Cerebro</a>
           <div class="row">
-            ${isAdmin(req) ? html`<a class="button" href="/admin">Admin</a>` : ''}
+            ${isAdmin(req) ? html`<a class="button secondary" href="/admin">Admin</a>` : ''}
             <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
           </div>
-        </div>
+        </header>
+        <h1>Tus apps</h1>
+        <p class="muted">Hola, ${name}.</p>
+        ${sentTo
+          ? html`<p class="notice" role="status">Idea enviada para ${sentTo.name}. El dueño la revisará; su estado aparece abajo.</p>`
+          : ''}
         ${apps.length === 0 ? html`<div class="card">Tu cuenta todavía no tiene apps asignadas.</div>` : ''}
-        <p class="muted">Tus solicitudes y tu versión de cada app son públicas en GitHub.</p>
-        ${apps.map((a) => portalAppCard(a, uid))}
+        ${apps.map((a) => portalAppCard(a, uid, notice.draft?.slug === a.slug ? notice.draft : undefined))}
+        ${footer()}
       `,
     );
+  }
+
+  app.get<{ Querystring: { enviada?: string } }>('/apks', async (req, reply) => {
+    reply.type('text/html; charset=utf-8');
+    const uid = portalUser(req);
+    if (uid === null) return reply.redirect('/', 303);
+    return renderPortal(req, uid, { sentTo: req.query.enviada });
   });
 
-  function portalAppCard(a: App, uid: number) {
+  function portalAppCard(a: App, uid: number, draft?: Draft) {
     const b = latestBuildFor(db, a, uid);
+    const branch = userBranch(uid);
     const reqs = listRequests(db, { userId: uid, appSlug: a.slug, limit: 5 });
+    const versionOf = (r: Request) => (r.status === 'built' ? buildForRequest(db, r.id, branch)?.versionCode : undefined);
+    const included = b
+      ? listRequests(db, { userId: uid, appSlug: a.slug, limit: 50 }).filter((r) => {
+          const v = versionOf(r);
+          return v !== undefined && v <= b.versionCode;
+        })
+      : [];
+    const fieldId = `idea-${a.slug}`;
     return html`
       <section class="card">
         <h2>${a.name}</h2>
         ${b
-          ? html`<p><a class="button" href="/apks/${a.slug}/latest.apk">Descargar APK v${b.versionCode}</a>
-              <span class="muted">· ${fmtDate(b.createdAt)} · ${b.commitSha.slice(0, 7)}</span></p>`
-          : html`<p class="muted">Todavía no tienes una versión propia de ${a.name}. Envía una solicitud y, cuando se publique, podrás descargarla aquí.</p>`}
+          ? html`<p><a class="button" href="/apks/${a.slug}/latest.apk">Descargar tu versión ${b.versionCode}</a></p>
+              <p class="muted">Publicada el ${fmtDate(b.createdAt)}</p>
+              ${included.length
+                ? html`<p class="target">Incluye tus ideas:</p>
+                    <ul class="includes">${included.slice(0, 5).map((r) => html`<li>${r.text}</li>`)}</ul>
+                    ${included.length > 5 ? html`<p class="muted">y ${included.length - 5} más.</p>` : ''}`
+                : ''}
+              <details class="hint"><summary>¿Cómo instalarla?</summary>
+                <p>Se instala encima de la que tienes, sin perder tus datos. Si Android pregunta, permite que el
+                  navegador instale apps solo para esta instalación.</p>
+              </details>`
+          : html`<p class="muted">Todavía no tienes una versión propia de ${a.name}. Envía una idea y, cuando se publique, podrás descargarla aquí.</p>`}
         <form method="post" action="/apks/${a.slug}/requests">
-          <textarea name="text" rows="2" minlength="${MIN_LENGTH}" maxlength="${MAX_LENGTH}"
-            placeholder="¿Qué mejorarías de ${a.name}?" required></textarea>
-          <p><button>Enviar solicitud</button></p>
+          <label class="field" for="${fieldId}">Tu idea para ${a.name}</label>
+          <textarea id="${fieldId}" name="text" rows="3" minlength="${MIN_LENGTH}" maxlength="${MAX_LENGTH}" required
+            aria-describedby="${fieldId}-help" placeholder="Por ejemplo: agregar un modo oscuro"
+            oninput="this.form.querySelector('.count').textContent = this.value.length + ' / ${MAX_LENGTH}'">${draft?.text ?? ''}</textarea>
+          <div class="field-foot">
+            <span id="${fieldId}-help" class="hint">Entre ${MIN_LENGTH} y ${MAX_LENGTH} caracteres. Será pública en GitHub: no escribas datos personales.</span>
+            <span class="count hint" aria-hidden="true">${(draft?.text ?? '').length} / ${MAX_LENGTH}</span>
+          </div>
+          ${draft ? html`<p class="error" role="alert">${draft.error}</p>` : ''}
+          <p><button>Enviar idea</button></p>
         </form>
         ${reqs.length
-          ? html`<ul class="list">${reqs.map(
-              (r) => html`<li><div class="row" style="justify-content:space-between">
-                <span>${r.text}</span><span class="status ${r.status}">${STATUS_LABEL[r.status]}</span></div>
-                ${r.reason ? html`<div class="muted">${r.reason}</div>` : ''}</li>`,
-            )}</ul>`
+          ? html`<h3>Tus ideas</h3><ul class="list">${reqs.map((r) => {
+              const v = versionOf(r);
+              return html`<li><div class="row" style="justify-content:space-between">
+                <span>${r.text}</span>
+                <span class="row">${v ? html`<span class="version">En v${v}</span>` : ''}<span class="status ${r.status}">${USER_STATUS_LABEL[r.status] ?? r.status}</span></span></div>
+                ${r.reason ? html`<div class="muted">${r.reason}</div>` : ''}</li>`;
+            })}</ul>`
           : ''}
       </section>`;
   }
@@ -334,9 +416,9 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     const res = createRequest(db, uid, req.params.slug, text);
     if (!res.ok) {
       reply.code(400).type('text/html; charset=utf-8');
-      return page('Cerebro', html`<div class="card"><p class="error">${res.error}</p><p><a href="/apks">Volver</a></p></div>`);
+      return renderPortal(req, uid, { draft: { slug: req.params.slug, text, error: res.error } });
     }
-    return reply.redirect('/apks', 303);
+    return reply.redirect(`/apks?enviada=${encodeURIComponent(req.params.slug)}`, 303);
   });
 
   app.get<{ Params: { slug: string }; Querystring: { dl?: string } }>('/apks/:slug/latest.apk', async (req, reply) => {
@@ -371,7 +453,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
         reply.code(403);
         return page('Cerebro · admin', html`<div class="card">Tu cuenta no es de administrador. <a href="/apks">Volver</a></div>`);
       }
-      return page('Cerebro · admin', loginPage('Cerebro · admin', '/admin', google !== undefined));
+      return page('Cerebro · admin', loginPage('Administración', '/admin', google !== undefined));
     }
     const all = listRequests(db, { limit: 60 });
     const pending = all.filter((r) => r.status === 'pending');
@@ -381,24 +463,27 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return page(
       'Cerebro · admin',
       html`
-        <div class="row" style="justify-content:space-between">
-          <h1>Cerebro · admin</h1>
+        <header class="topbar">
+          <a class="brand" href="/admin">${BRAND_MARK}Cerebro</a>
           <div class="row">
-            <a class="button" href="/apks">Mis APKs</a>
+            <a class="button secondary" href="/apks">Mis APKs</a>
             <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
           </div>
-        </div>
+        </header>
+        <h1>Administración</h1>
         <section class="card"><h2>Por aprobar (${pending.length})</h2>
           ${pending.length ? html`<ul class="list">${pending.map(adminPendingItem)}</ul>` : html`<p class="muted">Nada pendiente.</p>`}
         </section>
         ${review.length
           ? html`<section class="card"><h2>Por revisar (${review.length})</h2>
-              <p class="muted">Solicitudes forzadas: pasaron las pruebas en el sandbox. Lee el diff antes de compilar y publicar.</p>
+              <p class="muted">Solicitudes forzadas: pasaron las pruebas en el sandbox. Lee los cambios antes de publicarlas.</p>
               <ul class="list">${review.map(adminReviewItem)}</ul></section>`
           : ''}
-        <section class="card"><h2>En cola / implementando (${queue.length})</h2>
-          ${queue.length ? html`<ul class="list">${queue.map((r) => adminHistoryItem(r, true))}</ul>` : html`<p class="muted">Vacía.</p>`}
-        </section>
+        ${queue.length
+          ? html`<section class="card"><h2>En cola o programándose (${queue.length})</h2>
+              <p class="hint">La página se actualiza sola cada ${ADMIN_REFRESH_SEC} s, salvo mientras escribes.</p>
+              <ul class="list">${queue.map((r) => adminHistoryItem(r, true))}</ul></section>`
+          : ''}
         ${listApps(db).map(adminBuildsCard)}
         <section class="card"><h2>Historial</h2>
           ${done.length ? html`<ul class="list">${done.map((r) => adminHistoryItem(r))}</ul>` : html`<p class="muted">Sin historial.</p>`}
@@ -412,54 +497,66 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return r.userId !== null && isAdminEmail(config, getUser(db, r.userId)?.email);
   }
 
+  function appName(slug: string): string {
+    return getApp(db, slug)?.name ?? slug;
+  }
+
   function adminPendingItem(r: Request) {
+    const risky = r.flags.length > 0;
+    const rejectForm = `reject-${r.id}`;
     return html`<li>
-      <div><strong>${r.appSlug}</strong> · ${r.userName ?? 'sistema'} · <span class="muted">${fmtDate(r.createdAt)}</span></div>
+      <div><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">de ${r.userName ?? 'sistema'}, ${fmtDate(r.createdAt)}</span></div>
       <p>${r.text}</p>
-      ${r.flags.map((f) => html`<div class="flag">⚠ ${f}</div>`)}
-      <div class="row">
-        <form method="post" action="/admin/requests/${r.id}/approve" class="row">
-          ${authorIsAdmin(r)
-            ? html`<label class="row"><input type="checkbox" name="alsoMain" value="on" style="width:auto"> También a main</label>`
-            : ''}
-          <button>Aprobar</button>
-        </form>
-        <form method="post" action="/admin/requests/${r.id}/reject" class="row">
-          <input type="text" name="reason" placeholder="Motivo (opcional)" style="width:auto">
-          <button class="danger">Rechazar</button>
-        </form>
+      ${r.flags.map((f) => html`<div class="flag" role="note">⚠ ${f}</div>`)}
+      <div class="decide">
+        <form id="${rejectForm}" method="post" action="/admin/requests/${r.id}/reject"></form>
+        <label class="field" for="reason-${r.id}" style="margin:0">Motivo si la rechazas (opcional)</label>
+        <input id="reason-${r.id}" form="${rejectForm}" type="text" name="reason" placeholder="Por ejemplo: no es parte de esta app">
+        <div class="row">
+          <form method="post" action="/admin/requests/${r.id}/approve" class="row">
+            ${authorIsAdmin(r)
+              ? html`<label class="row"><input type="checkbox" name="alsoMain" value="on" style="width:auto"> También a main</label>`
+              : ''}
+            <button class="${risky ? 'secondary' : ''}">Aprobar #${r.id}</button>
+          </form>
+          <button form="${rejectForm}" class="${risky ? 'danger' : 'quiet'}">Rechazar #${r.id}</button>
+        </div>
       </div>
     </li>`;
   }
 
   function adminReviewItem(r: Request) {
     return html`<li>
-      <div><strong>#${r.id}</strong> ${r.appSlug} · ${r.userName ?? 'sistema'} · <span class="muted">main + ${r.branch}</span></div>
+      <div><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">de ${r.userName ?? 'sistema'}</span></div>
+      <p class="target">Va a main y a ${r.branch}.</p>
       <p>${r.text}</p>
       ${r.reason ? html`<p class="muted">${r.reason}</p>` : ''}
-      <details open><summary>Diff</summary><pre style="max-height:480px">${r.reviewPatch ?? ''}</pre></details>
+      <details open><summary>Cambios en el código</summary><pre class="diff">${renderDiff(r.reviewPatch ?? '')}</pre></details>
       ${r.log ? html`<details><summary class="muted">Log</summary><pre>${r.log}</pre></details>` : ''}
       <div class="row">
-        <form method="post" action="/admin/requests/${r.id}/publish"><button>Publicar</button></form>
-        <form method="post" action="/admin/requests/${r.id}/discard"><button class="danger">Descartar</button></form>
+        <form method="post" action="/admin/requests/${r.id}/publish"><button>Publicar en main y ${r.branch}</button></form>
+        <form method="post" action="/admin/requests/${r.id}/discard"
+          onsubmit="return confirm('¿Descartar #${r.id}? El cambio no llegará al repo.')"><button class="quiet">Descartar #${r.id}</button></form>
       </div>
     </li>`;
   }
 
   function adminHistoryItem(r: Request, openLog = false) {
+    const forceable = r.kind === 'change' && (r.status === 'failed' || r.status === 'discarded');
     return html`<li>
       <div class="row" style="justify-content:space-between">
-        <span><strong>#${r.id}</strong> ${r.appSlug} · ${r.userName ?? 'sistema'} · <span class="muted">${r.branch}${r.alsoMain ? ' + main' : ''}</span></span>
+        <span><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">de ${r.userName ?? 'sistema'}, ${r.branch}${r.alsoMain ? ' y main' : ''}</span></span>
         <span class="status ${r.status}">${STATUS_LABEL[r.status]}</span>
       </div>
       <div>${r.text}</div>
       ${r.reason ? html`<div class="muted">${r.reason}</div>` : ''}
       ${r.log ? html`<details ${openLog ? 'open' : ''}><summary class="muted">Log</summary><pre>${r.log}</pre></details>` : ''}
-      ${r.kind === 'change' && (r.status === 'failed' || r.status === 'discarded')
-        ? html`<form method="post" action="/admin/requests/${r.id}/force" class="row">
-            <button class="secondary">Forzar</button>
-            <span class="muted">Desbloquea el núcleo, dependencias y permisos de Android. Va a main y pide revisar el diff antes de publicar.</span>
-          </form>`
+      ${forceable
+        ? html`<details class="confirm"><summary>Forzar…</summary>
+            <p>Vuelve a programar #${r.id} con el núcleo, las dependencias y los permisos de Android desbloqueados. Va a
+              main, para todos. Antes de publicar vas a revisar los cambios.</p>
+            <form method="post" action="/admin/requests/${r.id}/force"><button class="danger">Forzar #${r.id}</button></form>
+          </details>`
         : ''}
     </li>`;
   }
@@ -476,9 +573,11 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
               .slice(0, 5)
               .map(
                 (b, i) => html`<li class="row" style="justify-content:space-between">
-                  <span>v${b.versionCode} · ${b.commitSha.slice(0, 7)} · <span class="muted">${fmtDate(b.createdAt)}</span>
+                  <span>v${b.versionCode} <span class="muted">${b.commitSha.slice(0, 7)}, ${fmtDate(b.createdAt)}</span>
                     ${i === 0 ? html` <span class="status built">actual</span>` : ''}</span>
-                  <form method="post" action="/admin/builds/${b.id}/revert"><button class="secondary">Revertir este cambio</button></form>
+                  <form method="post" action="/admin/builds/${b.id}/revert"
+                    onsubmit="return confirm('¿Revertir v${b.versionCode} en ${branch}? Se crea un commit nuevo y un APK nuevo.')">
+                    <button class="secondary">Revertir v${b.versionCode}</button></form>
                 </li>`,
               )}</ul>`,
           )
@@ -538,10 +637,10 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
 
 function loginPage(title: string, next: string, enabled: boolean) {
   return html`
+    <header class="topbar"><a class="brand" href="/">${BRAND_MARK}Cerebro</a></header>
     <h1>${title}</h1>
     <div class="card">
-      ${enabled
-        ? html`<p><a class="button" href="/auth/google/start?next=${encodeURIComponent(next)}">Entrar con Google</a></p>`
-        : html`<p class="error">El inicio de sesión con Google no está configurado.</p>`}
+      <p class="muted">Solo pueden entrar las cuentas de Google autorizadas como administradoras.</p>
+      ${enabled ? signInButton(next) : html`<p class="error">El inicio de sesión con Google no está configurado.</p>`}
     </div>`;
 }
