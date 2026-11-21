@@ -304,6 +304,7 @@ async function implementWithRetries(job: Job, mode: 'review' | 'publish'): Promi
     if (out.costUsd !== undefined) log(`Costo del intento: $${out.costUsd.toFixed(3)}`);
     if (out.refused) throw new Stop('discarded', `La IA no la implementó: ${out.refused}`);
 
+    await discardLockfileEdits(dir);
     const gate = await checkDiff(dir, gateRules(app, req.forced));
     log(`Diff: ${gate.files.length} archivos, +${gate.added}/-${gate.removed}`);
     if (gate.files.length === 0) {
@@ -325,6 +326,18 @@ async function implementWithRetries(job: Job, mode: 'review' | 'publish'): Promi
     feedback = check.feedback;
   }
   throw new Stop('failed', `No pasó la verificación después de ${MAX_ATTEMPTS} intentos.`);
+}
+
+export function withoutInfoLines(output: string): string {
+  const lines = output.split('\n');
+  const kept = lines.filter((l) => !/^\s*info\s+[•-]\s/.test(l));
+  const dropped = lines.length - kept.length;
+  return dropped ? `${kept.join('\n')}\n(${dropped} avisos "info" omitidos)` : output;
+}
+
+async function discardLockfileEdits(dir: string): Promise<void> {
+  if (!fs.existsSync(path.join(dir, 'pubspec.lock'))) return;
+  await run('git', ['checkout', 'HEAD', '--', 'pubspec.lock'], { cwd: dir });
 }
 
 async function prepareRevert(dir: string, req: Request, log: (l: string) => void): Promise<string> {
@@ -353,8 +366,9 @@ async function verify({ deps, app, dir, log }: Job, build = true): Promise<{ ok:
       ? await deps.sandbox.run(dir, cmd, STEP_TIMEOUT_MS)
       : await runShell(cmd, { cwd: dir, timeoutMs: STEP_TIMEOUT_MS });
     if (r.code !== 0) {
-      log(`${name} fallaron (${r.timedOut ? 'tiempo agotado' : `código ${r.code}`})\n${tail(r.output, 3000)}`);
-      return { ok: false, feedback: `${name} failed:\n${tail(r.output, 8000)}` };
+      const relevant = withoutInfoLines(r.output);
+      log(`${name} fallaron (${r.timedOut ? 'tiempo agotado' : `código ${r.code}`})\n${tail(relevant, 3000)}`);
+      return { ok: false, feedback: `${name} failed:\n${tail(relevant, 8000)}` };
     }
   }
   if (build && !fs.existsSync(path.join(dir, app.apkPath))) {

@@ -18,7 +18,7 @@ import {
   latestBuildOn,
 } from '../src/store.ts';
 import type { App, Request } from '../src/store.ts';
-import { processRequest } from '../src/worker/pipeline.ts';
+import { processRequest, withoutInfoLines } from '../src/worker/pipeline.ts';
 import { DirectSandbox } from '../src/worker/sandbox.ts';
 import type { AgentRunner, ImplementInput, ImplementOutput } from '../src/worker/runner.ts';
 import { ADMIN_EMAIL, createTestUser, makeRemoteApp, pushToRemote, registerApp, remoteBranches, remoteState, sh, testSetup } from './helpers.ts';
@@ -375,4 +375,32 @@ test('forced: discarded at review never reaches the repo; a stale diff fails ins
   const r = await run(s, new FakeRunner([]), claimNextApproved(s.db)!);
   assert.equal(r.status, 'failed');
   assert.match(r.reason ?? '', /ya no aplica/);
+});
+
+test('verification output drops analyzer info lines so the real errors reach the log and the AI', () => {
+  const out = [
+    '   info • deprecated import • test/a.dart:1:1 • deprecated_member_use',
+    "  error • The method 'listen' isn't defined • lib/core/mic.dart:12:5 • undefined_method",
+    '   info • deprecated import • test/b.dart:1:1 • deprecated_member_use',
+    '3 issues found.',
+  ].join('\n');
+  const kept = withoutInfoLines(out);
+  assert.match(kept, /error • The method 'listen'/);
+  assert.doesNotMatch(kept, /deprecated_member_use/);
+  assert.match(kept, /2 avisos "info" omitidos/);
+  assert.equal(withoutInfoLines('All tests passed!'), 'All tests passed!');
+});
+
+test('forced: edits to pubspec.lock are dropped before the gate instead of failing the attempt', async () => {
+  const s = setup('Agregar un botón de micrófono en el buzón');
+  pushToRemote(s.remote, 'main', { 'pubspec.lock': 'packages: {}\n' });
+  await run(s, new FakeRunner([() => ({ refused: 'Toca el núcleo.', summary: '' })]));
+  assert.ok(forceRequest(s.db, s.req.id));
+  const runner = new FakeRunner([
+    writes({ 'lib/core/mic.dart': '// mic\n', 'pubspec.lock': `sha256: "${'ab'.repeat(40)}"\n` }),
+  ]);
+  const r = await run(s, runner, claimNextApproved(s.db)!);
+  assert.equal(r.status, 'review', r.log);
+  assert.equal(runner.calls.length, 1);
+  assert.doesNotMatch(r.reviewPatch ?? '', /pubspec\.lock/);
 });

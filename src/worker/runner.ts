@@ -48,7 +48,7 @@ function scopeRules(app: App, forced: boolean): string[] {
     return [
       '- The admin of the app reviewed this request and explicitly approved it after a first refusal ("forced"). Implement it; refuse only if it is unsafe.',
       `- You may create or edit files under: ${app.allowedPaths.join(', ')}, including the protected core (${app.protectedPaths.join(', ') || 'none'}). Keep Google sign-in and the suggestions button working.`,
-      '- You may add well-known packages from pub.dev to the dependencies of pubspec.yaml. Change nothing else in pubspec.yaml. The pipeline runs `flutter pub get` after you.',
+      '- You may add well-known packages from pub.dev to the dependencies of pubspec.yaml. Change nothing else in pubspec.yaml, and never edit pubspec.lock: the pipeline runs `flutter pub get` after you and regenerates it.',
       '- You may edit android/app/src/main/AndroidManifest.xml only to add permissions or <queries> entries the new feature needs.',
       '- Never touch Gradle files, signing, ios/, CI files or anything that holds keys.',
     ];
