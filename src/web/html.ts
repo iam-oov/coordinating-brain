@@ -103,6 +103,9 @@ details.log[open] > summary { margin-bottom:8px; }
 .log-bar button.copy { min-height:32px; padding:0 12px; font-size:.85rem; gap:6px; }
 .log-bar button.copy .icon { width:15px; height:15px; }
 .log-panel pre { margin:0; border:0; border-radius:0; background:transparent; }
+details.earlier { margin-top:10px; }
+details.earlier > summary { cursor:pointer; font-size:.88rem; }
+.run-label { margin:12px 0 4px; font-size:.82rem; font-weight:600; color:var(--muted); }
 .build-row { display:flex; align-items:center; justify-content:space-between; gap:12px 16px; flex-wrap:wrap; }
 .build-info { flex:1 1 260px; min-width:0; }
 .build-title { margin:0; font-weight:600; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
@@ -315,6 +318,19 @@ export const USER_STATUS_LABEL: Record<string, string> = {
 };
 
 const LOG_ENTRY_START = /^(?:\d{4}-\d{2}-\d{2}T|…$)/;
+
+export const FORCED_LOG_LINE =
+  'Forzada por el admin: núcleo, dependencias y permisos de Android desbloqueados; pide revisión antes de publicar';
+const RUN_START = new RegExp(`^\\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z ${FORCED_LOG_LINE.split(':')[0]}`);
+
+export function splitRuns(log: string): string[] {
+  const runs: string[][] = [[]];
+  for (const line of log.replace(/\n+$/, '').split('\n')) {
+    if (RUN_START.test(line) && runs[runs.length - 1].length > 0) runs.push([]);
+    runs[runs.length - 1].push(line);
+  }
+  return runs.map((lines) => `${lines.join('\n')}\n`);
+}
 
 export function newestFirst(log: string): string {
   const entries: string[] = [];

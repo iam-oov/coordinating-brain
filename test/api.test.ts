@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 import { buildServer } from '../src/server.ts';
 import { addBuild, getRequest, listRequests, saveReview, upsertApp } from '../src/store.ts';
-import { newestFirst } from '../src/web/html.ts';
+import { FORCED_LOG_LINE, newestFirst, splitRuns } from '../src/web/html.ts';
 import { JEEP_OBD2 } from '../src/apps.ts';
 import type { App } from '../src/store.ts';
 import type { FakeGoogle, IdTokenClaims } from './helpers.ts';
@@ -553,4 +553,33 @@ test('logs read newest first, keeping multi-line entries in order', () => {
       '2026-11-21T02:15:21.234Z Preparación: flutter pub get',
     ].join('\n'),
   );
+});
+
+test('each force starts a clean run; earlier runs stay folded and Copy takes only the current one', async () => {
+  const log = [
+    '2026-11-21T01:53:23.359Z Clonando (main)',
+    '2026-11-21T01:53:32.874Z Terminado sin publicar: rechazo',
+    `2026-11-21T02:13:59.858Z ${FORCED_LOG_LINE}`,
+    '2026-11-21T02:15:45.215Z Pruebas fallaron (código 1)',
+    '  error • something',
+    `2026-11-21T04:22:05.441Z ${FORCED_LOG_LINE}`,
+    '2026-11-21T04:22:07.439Z Intento 1/3',
+    '',
+  ].join('\n');
+  const runs = splitRuns(log);
+  assert.equal(runs.length, 3);
+  assert.match(runs[1], /error • something/);
+  assert.match(runs[2], /^2026-11-21T04:22:05/);
+
+  const s = await setup();
+  await s.server.inject({ method: 'POST', url: '/api/apps/demo/requests', headers: await bearer(s, OSVALDO), payload: { text: VALID } });
+  const id = listRequests(s.db)[0].id;
+  s.db.prepare(`UPDATE requests SET status = 'running', log = ? WHERE id = ?`).run(log, id);
+  const admin = await webLogin(s, ADMIN, '/admin');
+  const body = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
+  assert.match(body, /Run 3 · 2 entries/);
+  assert.match(body, /Earlier runs \(2\)/);
+  const copied = body.match(/data-log="([^"]*)"/)![1];
+  assert.match(copied, /Intento 1\/3/);
+  assert.doesNotMatch(copied, /Clonando/);
 });

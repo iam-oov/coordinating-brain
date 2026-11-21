@@ -52,7 +52,20 @@ import {
 import { appPage } from './web/catalog.ts';
 import { errorMessage, flagLabel } from './web/copy.ts';
 import { FAVICON_SVG, ICONS } from './web/icons.ts';
-import { API_STATUS_LABEL, STATUS_LABEL, USER_STATUS_LABEL, fmtDate, fmtDay, html, newestFirst, page, raw, renderDiff } from './web/html.ts';
+import {
+  API_STATUS_LABEL,
+  FORCED_LOG_LINE,
+  STATUS_LABEL,
+  USER_STATUS_LABEL,
+  fmtDate,
+  fmtDay,
+  html,
+  newestFirst,
+  page,
+  raw,
+  renderDiff,
+  splitRuns,
+} from './web/html.ts';
 import { BRAND_MARK, appDetailPage, footer, landingPage, privacyPage, signInButton } from './web/landing.ts';
 import { MAX_LENGTH, MIN_LENGTH } from './worker/moderation.ts';
 
@@ -756,20 +769,36 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     </li>`;
   }
 
+  function runTime(run: string, which: 'first' | 'last'): string {
+    const stamps = run.match(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z/gm) ?? [];
+    const stamp = which === 'first' ? stamps[0] : stamps.at(-1);
+    return stamp ? new Date(stamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
+  }
+
   function logBlock(log: string, open = false) {
-    const stamps = log.match(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z/gm) ?? [];
-    const last = stamps.at(-1);
-    const lastAt = last ? new Date(last).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
+    const runs = splitRuns(log);
+    const current = runs[runs.length - 1];
+    const earlier = runs.slice(0, -1).reverse();
+    const entries = (current.match(/^\d{4}-\d{2}-\d{2}T/gm) ?? []).length;
+    const lastAt = runTime(current, 'last');
     return html`<details class="log" ${open ? 'open' : ''}>
       <summary class="muted">Log</summary>
       <div class="log-panel">
         <div class="log-bar">
-          <span>${stamps.length} ${stamps.length === 1 ? 'entry' : 'entries'}${lastAt ? `, last at ${lastAt}` : ''}</span>
-          <button type="button" class="secondary copy" data-log="${log}" aria-label="Copy the whole log"
+          <span>${runs.length > 1 ? `Run ${runs.length} · ` : ''}${entries} ${entries === 1 ? 'entry' : 'entries'}${lastAt ? `, last at ${lastAt}` : ''}</span>
+          <button type="button" class="secondary copy" data-log="${current}" aria-label="Copy this run's log"
             onclick="var b = this; navigator.clipboard.writeText(b.dataset.log).then(function () { b.lastChild.textContent = 'Copied'; setTimeout(function () { b.lastChild.textContent = 'Copy'; }, 2000); });">${ICONS.copy}<span>Copy</span></button>
         </div>
-        <pre>${newestFirst(log)}</pre>
+        <pre>${newestFirst(current)}</pre>
       </div>
+      ${earlier.length
+        ? html`<details class="earlier"><summary class="muted">Earlier runs (${earlier.length})</summary>
+            ${earlier.map(
+              (run, i) => html`<p class="run-label">Run ${runs.length - 1 - i}, started at ${runTime(run, 'first')}</p>
+                <div class="log-panel"><pre>${newestFirst(run)}</pre></div>`,
+            )}
+          </details>`
+        : ''}
     </details>`;
   }
 
@@ -888,7 +917,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     if (!isAdmin(req)) return reply.code(403).send('Forbidden');
     const id = Number(req.params.id);
     if (forceRequest(db, id)) {
-      appendLog(db, id, 'Forzada por el admin: núcleo, dependencias y permisos de Android desbloqueados; pide revisión antes de publicar');
+      appendLog(db, id, FORCED_LOG_LINE);
       wakeWorker?.();
     }
     return reply.redirect('/admin', 303);
