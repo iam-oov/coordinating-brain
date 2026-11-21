@@ -4,7 +4,8 @@ import { createGoogleCodeExchange, createGoogleVerifier } from './google.ts';
 import type { GoogleAuth } from './google.ts';
 import { buildServer } from './server.ts';
 import { requeueStuck } from './store.ts';
-import { ClaudeCliRunner } from './worker/runner.ts';
+import { ClaudeCliRunner, brainSecretPaths } from './worker/runner.ts';
+import { DirectSandbox, SystemdSandbox } from './worker/sandbox.ts';
 import type { WorkerHandle } from './worker/worker.ts';
 import { startWorker } from './worker/worker.ts';
 
@@ -28,10 +29,15 @@ if (webClientId && webClientSecret) {
 if (config.adminEmails.length === 0) console.warn('ADMIN_EMAILS is empty: nobody can open /admin.');
 
 let worker: WorkerHandle | null = null;
-if (config.workerEnabled) {
+if (config.workerEnabled && !config.sandbox) {
+  console.warn('SANDBOX is not set (systemd or none): the worker stays off.');
+} else if (config.workerEnabled) {
   const apiKey = process.env.ANTHROPIC_API_KEY ?? '';
   if (config.claude.bare && !apiKey) console.warn('ANTHROPIC_API_KEY is missing: Claude Code runs will fail in --bare mode.');
-  worker = startWorker({ db, config, runner: new ClaudeCliRunner(config.claude, apiKey) }, config.workerPollMs);
+  const secrets = brainSecretPaths(config, process.env.HOME ?? '/nonexistent', process.cwd());
+  const sandbox = config.sandbox === 'systemd' ? new SystemdSandbox(config.sandboxDir) : new DirectSandbox();
+  if (config.sandbox === 'none') console.warn('SANDBOX=none: the AI-written tests run without isolation.');
+  worker = startWorker({ db, config, sandbox, runner: new ClaudeCliRunner(config.claude, apiKey, secrets) }, config.workerPollMs);
 }
 
 const server = buildServer({ config, db, google, wakeWorker: () => worker?.wake() });

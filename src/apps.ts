@@ -9,7 +9,7 @@ export const JEEP_OBD2: App = {
   allowedPaths: ['lib/', 'test/', 'assets/'],
   protectedPaths: ['lib/core/', 'test/core/', 'lib/main.dart'],
   prepareCmd: 'flutter pub get',
-  testCmd: 'flutter analyze --no-fatal-infos && flutter test',
+  testCmd: 'flutter analyze --no-pub --no-fatal-infos && flutter test --no-pub',
   // Public APK: no API keys compiled in; users enter theirs in the app.
   buildCmd: 'flutter build apk --release --target-platform android-arm64',
   apkPath: 'build/app/outputs/flutter-apk/app-release.apk',

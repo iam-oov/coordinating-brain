@@ -18,6 +18,7 @@ import {
 import { checkDiff } from './diffGate.ts';
 import { git, run, runShell, tail } from './exec.ts';
 import type { AgentRunner } from './runner.ts';
+import type { TestSandbox } from './sandbox.ts';
 
 export const MAX_ATTEMPTS = 3;
 const STEP_TIMEOUT_MS = 30 * 60 * 1000;
@@ -26,6 +27,7 @@ export interface PipelineDeps {
   db: Db;
   config: Config;
   runner: AgentRunner;
+  sandbox: TestSandbox;
 }
 
 class Stop extends Error {
@@ -120,7 +122,7 @@ async function implementOn(job: Job, branch: string): Promise<{ summary: string;
   if (req.kind === 'revert') {
     summary = await prepareRevert(dir, req, log);
     await bumpVersion(deps.db, app, dir, log);
-    const check = await verify(app, dir, log);
+    const check = await verify(job);
     if (!check.ok) throw new Stop('failed', 'El código revertido no pasó la verificación.');
   } else {
     summary = await implementWithRetries(job);
@@ -154,7 +156,7 @@ async function carryToBranch(job: Job, branch: string, mainSha: string): Promise
       return;
     }
     await bumpVersion(deps.db, app, dir, log);
-    const check = await verify(app, dir, log);
+    const check = await verify(job);
     if (!check.ok) throw new Error('no pasó la verificación');
     await commitPushPublish(job, branch, `Mismo cambio que ${app.branch} (${mainSha.slice(0, 7)}).`);
   } catch (e) {
@@ -171,7 +173,7 @@ async function resumeTarget(job: Job, branch: string, sha: string): Promise<void
   if (branch !== app.branch && sha === req.mainSha) return;
   await fetchBranch(dir, branch);
   await git(dir, 'checkout', '-q', '--detach', sha);
-  const check = await verify(app, dir, log);
+  const check = await verify(job);
   if (!check.ok) throw new Stop('failed', `El commit ${sha.slice(0, 7)} de ${branch} no compiló al republicar.`);
   publish(job, branch, readVersionCode(dir) || maxVersionCode(deps.db, app.slug) + 1, sha);
 }
@@ -274,7 +276,7 @@ async function implementWithRetries(job: Job): Promise<string> {
     }
 
     await bumpVersion(deps.db, app, dir, log);
-    const check = await verify(app, dir, log);
+    const check = await verify(job);
     if (check.ok) return out.summary || 'Cambio implementado.';
     feedback = check.feedback;
   }
@@ -293,16 +295,19 @@ async function prepareRevert(dir: string, req: Request, log: (l: string) => void
   return `Se revirtió el cambio ${req.revertSha.slice(0, 7)}.`;
 }
 
-async function verify(app: App, dir: string, log: (l: string) => void): Promise<{ ok: true } | { ok: false; feedback: string }> {
+/** Prepare and build are trusted app config; the tests run the AI's code, so they go to the sandbox. */
+async function verify({ deps, app, dir, log }: Job): Promise<{ ok: true } | { ok: false; feedback: string }> {
   const steps = [
-    ['Preparación', app.prepareCmd],
-    ['Pruebas', app.testCmd],
-    ['Compilación', app.buildCmd],
+    ['Preparación', app.prepareCmd, false],
+    ['Pruebas', app.testCmd, true],
+    ['Compilación', app.buildCmd, false],
   ] as const;
-  for (const [name, cmd] of steps) {
+  for (const [name, cmd, sandboxed] of steps) {
     if (!cmd) continue;
     log(`${name}: ${cmd}`);
-    const r = await runShell(cmd, { cwd: dir, timeoutMs: STEP_TIMEOUT_MS });
+    const r = sandboxed
+      ? await deps.sandbox.run(dir, cmd, STEP_TIMEOUT_MS)
+      : await runShell(cmd, { cwd: dir, timeoutMs: STEP_TIMEOUT_MS });
     if (r.code !== 0) {
       log(`${name} fallaron (${r.timedOut ? 'tiempo agotado' : `código ${r.code}`})\n${tail(r.output, 3000)}`);
       return { ok: false, feedback: `${name} failed:\n${tail(r.output, 8000)}` };
@@ -373,7 +378,7 @@ async function commitPushPublish(job: Job, branch: string, summary: string): Pro
         await run('git', ['rebase', '--abort'], { cwd: dir });
         throw new Stop('failed', `${branch} cambió y el cambio ya no aplica limpio.`);
       }
-      const check = await verify(app, dir, log);
+      const check = await verify(job);
       if (!check.ok) throw new Stop('failed', `Después de actualizar con ${branch}, ya no pasa la verificación.`);
     }
   }

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+export FLUTTER_ROOT=/opt/flutter
+exec /opt/flutter/bin/cache/dart-sdk/bin/dart \
+  --packages=/opt/flutter/packages/flutter_tools/.dart_tool/package_config.json \
+  /opt/flutter/bin/cache/flutter_tools.snapshot --no-version-check "$@"

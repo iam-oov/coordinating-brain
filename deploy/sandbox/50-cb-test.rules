@@ -1,0 +1,7 @@
+polkit.addRule(function (action, subject) {
+  if (action.id !== "org.freedesktop.systemd1.manage-units") return;
+  if (subject.user !== "coordinating-brain") return;
+  var unit = action.lookup("unit");
+  var verb = action.lookup("verb");
+  if (verb === "start" && unit && /^cb-test@[0-9]+\.service$/.test(unit)) return polkit.Result.YES;
+});

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" =~ ^[0-9]+$ ]]
+dir="/var/lib/cb-sandbox/$1"
+mkdir -p "$HOME"
+cd "$dir"
+exec bash "$dir/.cmd"

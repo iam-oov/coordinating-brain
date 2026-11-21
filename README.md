@@ -69,15 +69,24 @@ Other CLI commands: `user:link`, `user:grant`, `user:revoke`, `user:enable`, `us
 ## Deploy (Linux server)
 
 1. Create an unprivileged user `coordinating-brain` and clone this repo to `/home/coordinating-brain/coordinating-brain`; `npm ci --omit=dev`.
-2. Install, for the `coordinating-brain` user: Node 26.13.1, git, JDK 17, the Flutter SDK, the Android SDK (`platforms`, `build-tools`, accepted licenses) and Claude Code.
+2. Install, for the `coordinating-brain` user: Node 26.13.1, git, JDK 17, the Flutter SDK in `/opt/flutter` (owned by `coordinating-brain`), the Android SDK (`platforms`, `build-tools`, accepted licenses) and Claude Code.
 3. Give the worker push access to each app repo: a GitHub **deploy key with write access** in `~coordinating-brain/.ssh`, and `github.com` in `known_hosts`.
 4. Copy the signing key the app is already installed with. jeep-obd2's release build is signed with the debug keystore, so copy `~/.android/debug.keystore` from the machine that built the installed APK to `~coordinating-brain/.android/debug.keystore`. Otherwise Android refuses to update the app and asks to uninstall it, which loses its data.
 5. Create `/home/coordinating-brain/coordinating-brain/.env` from `.env.example`: `GOOGLE_WEB_CLIENT_ID`, `GOOGLE_WEB_CLIENT_SECRET`, `ADMIN_EMAILS`, `ANTHROPIC_API_KEY` (Claude Code in `--bare` mode only accepts an API key), `PUBLIC_URL=https://cerebro.valdoh.com`, `TRUST_PROXY=1`.
 6. Register apps with the CLI, as the `coordinating-brain` user (`app:jeep`). Users sign up themselves with Google; a user created before Google sign-in is linked with `user:link <name> <email>`.
-7. Install `deploy/coordinating-brain.service` in `/etc/systemd/system/` and enable it.
-8. In the Cloudflare Tunnel (Zero Trust dashboard), add the public hostname `cerebro.valdoh.com → http://localhost:8791`. The tunnel terminates TLS; no reverse proxy or open ports are needed.
+7. Install the test sandbox: `sudo deploy/sandbox/install.sh`, then set `SANDBOX=systemd` in `.env`. Repeat it after updating Flutter in `/opt/flutter`.
+8. Install `deploy/coordinating-brain.service` in `/etc/systemd/system/` and enable it.
+9. In the Cloudflare Tunnel (Zero Trust dashboard), add the public hostname `cerebro.valdoh.com → http://localhost:8791`. The tunnel terminates TLS; no reverse proxy or open ports are needed.
 
 Set a monthly spend limit on the Anthropic API key. `CLAUDE_MAX_BUDGET_USD` caps each Claude Code run (default 3).
+
+## Sandbox
+
+The AI writes code and the tests run it, so `testCmd` never runs as the brain. It runs in `cb-test@<n>.service` (`deploy/sandbox/`): user `cb-build`, no network, no `/home` (no `.env`, SSH or signing keys), read-only system and SDK, 3 GB of memory, 30 minutes. The brain copies the working copy (without `.git` or `build/`) to `/var/lib/cb-sandbox/<n>` and starts the unit through a polkit rule that allows only that. `prepareCmd` (`flutter pub get`, needs the network) and `buildCmd` run outside, as trusted app config, with the same SDK and pub cache (`/var/lib/cb-cache/pub-cache`).
+
+Claude Code itself runs with file tools only and with `--settings` rules that deny reading or editing the brain's secrets: `~/.ssh`, `~/.android`, `~/.gradle`, `~/.claude`, `~/.config`, any `.env`, the database and the published APKs.
+
+The worker does not start unless `SANDBOX` is `systemd` (or `none`, only for local development).
 
 ## Layout
 
@@ -85,6 +94,6 @@ Set a monthly spend limit on the Anthropic API key. `CLAUDE_MAX_BUDGET_USD` caps
 - `src/auth.ts` — sessions, OAuth state, lockout, download tokens.
 - `src/google.ts` — Google ID token verification and the OAuth code exchange.
 - `src/store.ts`, `src/db.ts` — SQLite schema and queries.
-- `src/worker/` — queue (`worker.ts`), pipeline (`pipeline.ts`), Claude Code runner (`runner.ts`), diff gate (`diffGate.ts`), first-pass moderation (`moderation.ts`).
+- `src/worker/` — queue (`worker.ts`), pipeline (`pipeline.ts`), Claude Code runner (`runner.ts`), diff gate (`diffGate.ts`), first-pass moderation (`moderation.ts`), test sandbox (`sandbox.ts`).
 - `src/cli.ts` — admin CLI.
 - `test/` — tests with a fake Claude and a local git remote; no API calls.

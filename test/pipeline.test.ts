@@ -17,6 +17,7 @@ import {
 } from '../src/store.ts';
 import type { App, Request } from '../src/store.ts';
 import { processRequest } from '../src/worker/pipeline.ts';
+import { DirectSandbox } from '../src/worker/sandbox.ts';
 import type { AgentRunner, ImplementInput, ImplementOutput } from '../src/worker/runner.ts';
 import { ADMIN_EMAIL, createTestUser, makeRemoteApp, pushToRemote, registerApp, remoteBranches, remoteState, sh, testSetup } from './helpers.ts';
 
@@ -60,7 +61,7 @@ const writes = (files: Record<string, string>, summary = 'ok') => ({ cwd }: Impl
 };
 
 async function run(s: ReturnType<typeof setup>, runner: AgentRunner, req: Request = s.req) {
-  await processRequest({ db: s.db, config: s.config, runner }, req);
+  await processRequest({ db: s.db, config: s.config, runner, sandbox: new DirectSandbox() }, req);
   return getRequest(s.db, req.id)!;
 }
 

@@ -10,8 +10,9 @@ User=coordinating-brain
 Group=coordinating-brain
 WorkingDirectory=/home/coordinating-brain/coordinating-brain
 EnvironmentFile=/home/coordinating-brain/coordinating-brain/.env
-Environment=PATH=/home/coordinating-brain/flutter/bin:/home/coordinating-brain/android-sdk/cmdline-tools/latest/bin:/home/coordinating-brain/android-sdk/platform-tools:/home/coordinating-brain/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/opt/flutter/bin:/home/coordinating-brain/android-sdk/cmdline-tools/latest/bin:/home/coordinating-brain/android-sdk/platform-tools:/home/coordinating-brain/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=ANDROID_HOME=/home/coordinating-brain/android-sdk
+Environment=PUB_CACHE=/var/lib/cb-cache/pub-cache
 ExecStart=/usr/local/bin/node src/main.ts
 Restart=on-failure
 RestartSec=5

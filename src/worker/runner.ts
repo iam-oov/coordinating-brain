@@ -1,4 +1,6 @@
-import type { ClaudeConfig } from '../config.ts';
+import path from 'node:path';
+
+import type { ClaudeConfig, Config } from '../config.ts';
 import type { App, Request } from '../store.ts';
 import { run, tail } from './exec.ts';
 
@@ -28,6 +30,18 @@ export const AI_TOOLS = 'Read,Edit,Write,Glob,Grep';
 export const AI_DENIED_TOOLS = 'Bash,WebFetch,WebSearch,NotebookEdit,Task';
 
 const REFUSAL = 'RECHAZO:';
+
+/** Glob patterns (absolute) of the brain's secrets: keys, sessions, the database and published APKs. */
+export function brainSecretPaths(config: Pick<Config, 'dataDir' | 'dbPath' | 'apksDir'>, home: string, brainRoot: string): string[] {
+  const homeDirs = ['.ssh', '.android', '.gradle', '.claude', '.config', '.anthropic'].map((d) => `${path.join(home, d)}/**`);
+  return [...homeDirs, `${path.join(brainRoot, '.env')}*`, `${config.dbPath}*`, `${config.apksDir}/**`];
+}
+
+/** Claude Code settings that deny reading or editing [secretPaths] and any .env file. */
+export function denySettings(secretPaths: string[]): string {
+  const patterns = [...secretPaths.map((p) => `/${p}`), '**/.env*'];
+  return JSON.stringify({ permissions: { deny: patterns.flatMap((p) => [`Read(${p})`, `Edit(${p})`]) } });
+}
 
 export function systemPrompt(app: App): string {
   return [
@@ -69,10 +83,12 @@ export function userPrompt(input: ImplementInput): string {
 export class ClaudeCliRunner implements AgentRunner {
   readonly config: ClaudeConfig;
   readonly apiKey: string;
+  readonly secretPaths: string[];
 
-  constructor(config: ClaudeConfig, apiKey: string) {
+  constructor(config: ClaudeConfig, apiKey: string, secretPaths: string[] = []) {
     this.config = config;
     this.apiKey = apiKey;
+    this.secretPaths = secretPaths;
   }
 
   args(input: ImplementInput): string[] {
@@ -95,6 +111,8 @@ export class ClaudeCliRunner implements AgentRunner {
       String(this.config.maxBudgetUsd),
       '--no-session-persistence',
       '--strict-mcp-config',
+      '--settings',
+      denySettings(this.secretPaths),
     ];
     if (this.config.bare) args.push('--bare');
     return args;

@@ -1,0 +1,29 @@
+[Unit]
+Description=coordinating-brain sandboxed tests (%i)
+
+[Service]
+Type=oneshot
+User=cb-build
+Group=cb-build
+SupplementaryGroups=cb-sandbox
+UMask=0002
+Environment=HOME=/tmp/home
+Environment=PUB_CACHE=/var/lib/cb-cache/pub-cache
+Environment=PATH=/usr/local/lib/cb/bin:/opt/flutter/bin/cache/dart-sdk/bin:/usr/local/bin:/usr/bin:/bin
+Environment=FLUTTER_ALREADY_LOCKED=true
+Environment=FLUTTER_SUPPRESS_ANALYTICS=true
+Environment=CI=true
+Environment=GIT_CONFIG_COUNT=1
+Environment=GIT_CONFIG_KEY_0=safe.directory
+Environment=GIT_CONFIG_VALUE_0=/opt/flutter
+PrivateNetwork=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/cb-sandbox/%i
+MemoryMax=3G
+TimeoutStartSec=1800
+StandardOutput=truncate:/var/lib/cb-sandbox/%i/.out
+StandardError=inherit
+ExecStart=/usr/local/lib/cb/run-tests %i
