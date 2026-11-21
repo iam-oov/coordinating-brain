@@ -46,7 +46,7 @@ const STYLE = `
   unicode-range:U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
 :root { color-scheme: light dark;
   --bg:#edf1ec; --card:#f7f9f6; --fg:#17231c; --muted:#56665c; --line:#c9d3cb; --field:#75877b;
-  --branch:#2557d6; --branch-fg:#ffffff; --node:#e2a62a; --node-text:#875800; --bad:#b3261e; --bad-fg:#ffffff;
+  --branch:#2557d6; --branch-fg:#ffffff; --node:#e2a62a; --node-text:#7a4f00; --bad:#b3261e; --bad-fg:#ffffff;
   --ok:#2e7d4f; --focus:#2557d6; --add:#1f6b3d; --del:#a3271d; }
 @media (prefers-color-scheme: dark) { :root {
   --bg:#0f1712; --card:#16211a; --fg:#e4ece6; --muted:#93a49a; --line:#2a3a30; --field:#5f7768;
@@ -71,6 +71,7 @@ a { color:var(--branch); text-underline-offset:.18em; }
 input[type=text], textarea { font:inherit; padding:12px 14px; border-radius:12px; border:1px solid var(--field);
   background:var(--bg); color:var(--fg); width:100%; }
 ::placeholder { color:var(--muted); opacity:1; }
+select.select { font:inherit; min-height:48px; padding:0 14px; border-radius:12px; border:1px solid var(--field); background:var(--bg); color:var(--fg); width:100%; }
 textarea { resize:vertical; }
 label.field { display:block; font-weight:600; margin:14px 0 6px; }
 .field-foot { display:flex; justify-content:space-between; gap:12px; margin-top:6px; }
@@ -82,11 +83,11 @@ button:hover, .button:hover { filter:brightness(1.08); }
 button.secondary, .button.secondary { background:transparent; color:var(--fg); border-color:var(--line); }
 button.danger { background:var(--bad); color:var(--bad-fg); }
 button.quiet { background:transparent; color:var(--bad); border-color:var(--bad); }
-.status { font-size:.8rem; padding:2px 10px; border-radius:999px; border:1px solid var(--line); white-space:nowrap; }
-.status.built { color:var(--ok); border-color:var(--ok); }
-.status.failed, .status.rejected, .status.discarded { color:var(--bad); border-color:var(--bad); }
-.status.review { color:var(--node-text); border-color:var(--node-text); }
-.status.pending, .status.approved, .status.running { color:var(--muted); }
+.status { display:inline-block; font-size:.76rem; font-weight:600; line-height:1.4; padding:2px 7px; border-radius:5px;
+  white-space:nowrap; color:var(--muted); background:color-mix(in srgb, currentColor 10%, transparent); }
+.status.built { color:var(--ok); }
+.status.failed, .status.rejected, .status.discarded { color:var(--bad); }
+.status.review { color:var(--node-text); }
 .version { font-size:.8rem; font-weight:600; color:var(--node-text); white-space:nowrap; }
 .flag { color:var(--bad); font-size:.88rem; }
 .error { color:var(--bad); }
@@ -205,7 +206,32 @@ details.confirm[open] { border:1px solid var(--bad); border-radius:12px; padding
 .timeline .off-text { color:var(--muted); }
 .timeline .note { margin:4px 0 0; color:var(--muted); font-size:.94rem; }
 .timeline .base { margin:0; color:var(--muted); font-size:.94rem; align-self:center; white-space:nowrap; }
-.pill-in { font-size:.8rem; font-weight:700; color:#17231c; background:var(--node); border-radius:999px; padding:2px 10px; white-space:nowrap; }
+.pill-in { display:inline-block; font-size:.76rem; font-weight:700; line-height:1.4; color:#17231c; background:var(--node); border-radius:5px; padding:2px 7px; white-space:nowrap; }
+.icon { flex:none; }
+.switcher { display:flex; gap:10px; overflow-x:auto; padding:2px 28px 8px 2px; margin:0 0 28px; list-style:none; scrollbar-width:thin;
+  mask-image:linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+.switcher li { flex:none; display:flex; align-items:center; border:1px solid var(--line); border-radius:16px; background:transparent; }
+.switcher li.current { border-color:var(--branch); background:var(--card); box-shadow:0 1px 2px rgba(23,35,28,.06), 0 4px 14px rgba(23,35,28,.06); }
+.switcher a { display:flex; align-items:center; gap:10px; min-height:52px; padding:0 4px 0 10px; color:var(--fg); text-decoration:none; font-weight:600; }
+.switcher .app-icon { width:34px; height:34px; border-radius:9px; }
+.switcher .app-icon svg { width:20px; height:20px; }
+.switcher .count { font-size:.78rem; font-weight:700; color:var(--branch-fg); background:var(--branch); border-radius:5px; padding:0 6px; }
+.fav { display:grid; place-items:center; width:44px; height:44px; padding:0; border:0; border-radius:12px; background:transparent;
+  color:var(--muted); cursor:pointer; }
+.fav:hover { color:var(--bad); filter:none; }
+.fav.on { color:var(--bad); }
+.filters { display:flex; gap:6px; flex-wrap:wrap; margin:0 0 18px; }
+.filters a { display:inline-flex; align-items:center; min-height:36px; padding:0 12px; border-radius:8px; text-decoration:none; color:var(--muted);
+  font-size:.9rem; font-weight:600; }
+.filters a[aria-current="true"] { background:var(--card); color:var(--fg); box-shadow:inset 0 0 0 1px var(--line); }
+.more-row { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-top:18px; color:var(--muted); font-size:.9rem; }
+details.fold > summary { cursor:pointer; list-style:none; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+details.fold > summary::-webkit-details-marker { display:none; }
+details.fold > summary h2 { margin:0; }
+details.fold > summary .icon { transition:transform .2s ease-out; color:var(--muted); }
+details.fold[open] > summary .icon { transform:rotate(180deg); }
+details.fold[open] > summary { margin-bottom:14px; }
+@media (prefers-reduced-motion: reduce) { details.fold > summary .icon { transition:none; } }
 body.portal main { max-width:1000px; }
 @media (min-width: 860px) {
   .app-grid { grid-template-columns:minmax(0, 1.1fr) minmax(0, 1fr); grid-template-rows:auto 1fr;
@@ -223,7 +249,9 @@ body.portal main { max-width:1000px; }
 }
 `;
 
-const FONTS = '<link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>';
+const FONTS =
+  '<link rel="icon" href="/favicon.svg" type="image/svg+xml">' +
+  '<link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>';
 
 function refreshScript(seconds: number): string {
   return `<script data-refresh="${seconds}">setInterval(function () {
@@ -237,7 +265,7 @@ function refreshScript(seconds: number): string {
 export function page(title: string, body: Raw, opts: { refreshSec?: number; bodyClass?: string } = {}): string {
   const refresh = opts.refreshSec ? refreshScript(opts.refreshSec) : '';
   return `<!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -250,7 +278,7 @@ ${FONTS}
 </html>`;
 }
 
-export const USER_STATUS_LABEL: Record<string, string> = {
+export const API_STATUS_LABEL: Record<string, string> = {
   pending: 'Esperando aprobación',
   approved: 'Aprobada, en cola',
   rejected: 'Rechazada',
@@ -259,6 +287,17 @@ export const USER_STATUS_LABEL: Record<string, string> = {
   built: 'Lista',
   failed: 'No se pudo publicar',
   discarded: 'Descartada',
+};
+
+export const USER_STATUS_LABEL: Record<string, string> = {
+  pending: 'Waiting for approval',
+  approved: 'Approved, queued',
+  rejected: 'Rejected',
+  running: 'Being built',
+  review: 'Owner is reviewing the code',
+  built: 'Ready',
+  failed: 'Could not be published',
+  discarded: 'Discarded',
 };
 
 export function renderDiff(patch: string): Raw {
@@ -270,22 +309,22 @@ export function renderDiff(patch: string): Raw {
 }
 
 export const STATUS_LABEL: Record<string, string> = {
-  pending: 'Esperando aprobación',
-  approved: 'En cola',
-  rejected: 'Rechazada',
-  running: 'Implementando',
-  review: 'Por revisar',
-  built: 'Lista',
-  failed: 'Falló',
-  discarded: 'Descartada',
+  pending: 'Pending',
+  approved: 'Queued',
+  rejected: 'Rejected',
+  running: 'Building',
+  review: 'To review',
+  built: 'Built',
+  failed: 'Failed',
+  discarded: 'Discarded',
 };
 
 export function fmtDay(ms: number | null): string {
   if (!ms) return '';
-  return new Date(ms).toLocaleDateString('es-MX', { dateStyle: 'medium' });
+  return new Date(ms).toLocaleDateString('en-US', { dateStyle: 'medium' });
 }
 
 export function fmtDate(ms: number | null): string {
   if (!ms) return '';
-  return new Date(ms).toLocaleString('es-MX', { dateStyle: 'medium', timeStyle: 'short' });
+  return new Date(ms).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
 }

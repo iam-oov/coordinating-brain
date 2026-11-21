@@ -125,6 +125,10 @@ ALTER TABLE requests ADD COLUMN review_ok    INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE requests ADD COLUMN review_patch TEXT;
 `;
 
+const FAVORITE_APPS = `
+ALTER TABLE user_apps ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+`;
+
 interface Migration {
   sql: string;
   rebuildsTables: boolean;
@@ -134,6 +138,7 @@ const MIGRATIONS: Migration[] = [
   { sql: SCHEMA, rebuildsTables: false },
   { sql: GOOGLE_AUTH_AND_BRANCHES, rebuildsTables: true },
   { sql: FORCED_REQUESTS, rebuildsTables: false },
+  { sql: FAVORITE_APPS, rebuildsTables: false },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

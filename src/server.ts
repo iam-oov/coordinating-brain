@@ -22,10 +22,13 @@ import {
 } from './auth.ts';
 import type { GoogleAuth, GoogleIdentity } from './google.ts';
 import { authorizeUrl } from './google.ts';
-import type { App, Build, Request } from './store.ts';
+import type { App, Build, Request, RequestStatus } from './store.ts';
 import {
   appendLog,
   appsForUser,
+  countRequests,
+  favoriteApps,
+  setFavorite,
   buildForRequest,
   createRequest,
   createRevertRequest,
@@ -47,7 +50,9 @@ import {
   userCanUseApp,
 } from './store.ts';
 import { appPage } from './web/catalog.ts';
-import { STATUS_LABEL, USER_STATUS_LABEL, fmtDate, fmtDay, html, page, raw, renderDiff } from './web/html.ts';
+import { errorMessage, flagLabel } from './web/copy.ts';
+import { FAVICON_SVG, ICONS } from './web/icons.ts';
+import { API_STATUS_LABEL, STATUS_LABEL, USER_STATUS_LABEL, fmtDate, fmtDay, html, page, raw, renderDiff } from './web/html.ts';
 import { BRAND_MARK, appDetailPage, footer, landingPage, privacyPage, signInButton } from './web/landing.ts';
 import { MAX_LENGTH, MIN_LENGTH } from './worker/moderation.ts';
 
@@ -117,7 +122,7 @@ function requestJson(db: Db, r: Request) {
     kind: r.kind,
     text: r.text,
     status: r.status,
-    statusLabel: USER_STATUS_LABEL[r.status] ?? r.status,
+    statusLabel: API_STATUS_LABEL[r.status] ?? r.status,
     reason: r.reason,
     createdAt: r.createdAt,
     finishedAt: r.finishedAt,
@@ -148,32 +153,44 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
 
   const FONT_FILES = new Set(['bricolage-grotesque-latin.woff2', 'bricolage-grotesque-latin-ext.woff2']);
   app.get<{ Params: { file: string } }>('/fonts/:file', async (req, reply) => {
-    if (!FONT_FILES.has(req.params.file)) return reply.code(404).send('No encontrado');
+    if (!FONT_FILES.has(req.params.file)) return reply.code(404).send('Not found');
     reply.type('font/woff2').header('cache-control', 'public, max-age=31536000, immutable');
     return reply.send(fs.createReadStream(path.join(FONTS_DIR, req.params.file)));
   });
+
+  app.get('/favicon.svg', async (_req, reply) =>
+    reply.type('image/svg+xml').header('cache-control', 'public, max-age=86400').send(FAVICON_SVG),
+  );
+  app.get('/favicon.ico', async (_req, reply) => reply.redirect('/favicon.svg', 301));
   app.get('/', async (req, reply) => {
     if (portalUser(req) !== null) return reply.redirect('/apks', 303);
     return reply.type('text/html; charset=utf-8').send(page('Cerebro', landingPage(google !== undefined), { bodyClass: 'landing' }));
   });
 
-  app.get('/privacidad', async (_req, reply) =>
-    reply.type('text/html; charset=utf-8').send(page('Cerebro · Privacidad', privacyPage(google !== undefined), { bodyClass: 'landing' })),
-  );
+  for (const route of ['/privacy', '/privacidad']) {
+    app.get(route, async (req, reply) =>
+      reply
+        .type('text/html; charset=utf-8')
+        .send(page('Privacy · Cerebro', privacyPage(google !== undefined, portalUser(req) !== null), { bodyClass: 'landing' })),
+    );
+  }
 
   app.get<{ Params: { slug: string } }>('/apps/:slug', async (req, reply) => {
     const info = appPage(req.params.slug);
     const a = getApp(db, req.params.slug);
-    if (!info || !a) return reply.code(404).type('text/html; charset=utf-8').send(page('Cerebro', html`<div class="card">Esa app no existe. <a href="/">Volver</a></div>`));
+    if (!info || !a) {
+      return reply.code(404).type('text/html; charset=utf-8').send(page('Cerebro', html`<div class="card">That app does not exist. <a href="/">Go back</a></div>`));
+    }
     const hasBuild = !!latestBuildOn(db, a.slug, a.branch);
-    return reply.type('text/html; charset=utf-8').send(page(`${info.name} · Cerebro`, appDetailPage(info, hasBuild, google !== undefined), { bodyClass: 'landing' }));
+    const body = appDetailPage(info, hasBuild, google !== undefined, portalUser(req) !== null);
+    return reply.type('text/html; charset=utf-8').send(page(`${info.name} · Cerebro`, body, { bodyClass: 'landing' }));
   });
 
   app.get<{ Params: { slug: string } }>('/apps/:slug/apk', async (req, reply) => {
     const a = getApp(db, req.params.slug);
     const b = a && appPage(a.slug) ? latestBuildOn(db, a.slug, a.branch) : null;
     const file = a && b ? path.join(config.apksDir, a.slug, b.apkFile) : '';
-    if (!a || !b || !fs.existsSync(file)) return reply.code(404).send('Todavía no hay un APK publicado de esta app.');
+    if (!a || !b || !fs.existsSync(file)) return reply.code(404).send('There is no published APK of this app yet.');
     reply
       .type('application/vnd.android.package-archive')
       .header('content-disposition', `attachment; filename="${a.slug}.apk"`)
@@ -296,29 +313,54 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     error: string;
   }
 
-  function renderPortal(req: FastifyRequest, uid: number, notice: { sentTo?: string; draft?: Draft } = {}) {
+  interface PortalView {
+    app?: string;
+    sentTo?: string;
+    ideas?: string;
+    shown?: number;
+    draft?: Draft;
+  }
+
+  const IDEA_FILTERS: { key: string; label: string; statuses?: RequestStatus[] }[] = [
+    { key: 'all', label: 'All' },
+    { key: 'built', label: 'In your version', statuses: ['built'] },
+    { key: 'open', label: 'In progress', statuses: ['pending', 'approved', 'running', 'review'] },
+    { key: 'closed', label: 'Not published', statuses: ['failed', 'discarded', 'rejected'] },
+  ];
+  const IDEAS_PAGE = 5;
+
+  function portalHref(slug: string, extra: Record<string, string | number> = {}): string {
+    const q = new URLSearchParams({ app: slug, ...Object.fromEntries(Object.entries(extra).map(([k, v]) => [k, String(v)])) });
+    return `/apks?${q.toString()}`;
+  }
+
+  function renderPortal(req: FastifyRequest, uid: number, view: PortalView = {}) {
     const name = getUser(db, uid)?.name ?? '';
     const apps = appsForUser(db, uid);
-    const sentTo = notice.sentTo ? apps.find((a) => a.slug === notice.sentTo) : undefined;
+    const favorites = favoriteApps(db, uid);
+    const current = apps.find((a) => a.slug === (view.draft?.slug ?? view.app)) ?? apps[0];
+    const sentTo = view.sentTo ? apps.find((a) => a.slug === view.sentTo) : undefined;
     return page(
-      'Cerebro · Tus apps',
+      'Your apps · Cerebro',
       html`
         <header class="topbar">
           <a class="brand" href="/apks">${BRAND_MARK}Cerebro</a>
           <div class="row">
-            ${isAdmin(req) ? html`<a class="button secondary" href="/admin">Admin</a>` : ''}
-            <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
+            ${isAdmin(req) ? html`<a class="button secondary" href="/admin">${ICONS.shield}Admin</a>` : ''}
+            <form method="post" action="/apks/logout"><button class="secondary">${ICONS.signOut}Sign out</button></form>
           </div>
         </header>
         <div class="portal-head">
-          <p>Hola, ${name}</p>
-          <h1>Tus apps</h1>
+          <p>Hi, ${name}</p>
+          <h1>Your apps</h1>
         </div>
+        ${apps.length > 1 ? appSwitcher(apps, favorites, current?.slug, '/apks') : ''}
         ${sentTo
-          ? html`<p class="notice" role="status">Idea enviada para ${sentTo.name}. El dueño la revisará; su estado aparece en Tus ideas.</p>`
+          ? html`<p class="notice" role="status">Idea sent for ${sentTo.name}. The owner will review it; its status shows up in Your ideas.</p>`
           : ''}
-        ${apps.length === 0 ? html`<div class="card">Tu cuenta todavía no tiene apps asignadas.</div>` : ''}
-        ${apps.map((a) => portalAppCard(a, uid, notice.draft?.slug === a.slug ? notice.draft : undefined))}
+        ${current
+          ? portalAppCard(current, apps, favorites, uid, view)
+          : html`<div class="card">Your account has no apps yet.</div>`}
         ${footer()}
         <script>if (matchMedia('(min-width: 860px)').matches) document.querySelectorAll('details.idea-toggle').forEach(function (d) { d.open = true; });</script>
       `,
@@ -326,25 +368,52 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     );
   }
 
-  app.get<{ Querystring: { enviada?: string } }>('/apks', async (req, reply) => {
+  function appSwitcher(apps: App[], favorites: Set<string>, currentSlug: string | undefined, base: string, counts?: Map<string, number>) {
+    return html`<nav aria-label="Apps"><ul class="switcher">
+      ${apps.map((a) => {
+        const fav = favorites.has(a.slug);
+        const info = appPage(a.slug);
+        const n = counts?.get(a.slug) ?? 0;
+        return html`<li class="${a.slug === currentSlug ? 'current' : ''}">
+          <a href="${base}?app=${encodeURIComponent(a.slug)}" aria-current="${a.slug === currentSlug ? 'page' : 'false'}">
+            <span class="app-icon">${info ? info.icon : ICONS.apps}</span>${a.name}${n ? html`<span class="count" aria-label="${n} pending">${n}</span>` : ''}
+          </a>
+          <form method="post" action="/apks/${a.slug}/favorite">
+            <input type="hidden" name="favorite" value="${fav ? '0' : '1'}">
+            <input type="hidden" name="back" value="${base}">
+            <button class="fav ${fav ? 'on' : ''}" aria-label="${fav ? `Remove ${a.name} from favorites` : `Add ${a.name} to favorites`}"
+              aria-pressed="${fav ? 'true' : 'false'}">${fav ? ICONS.heartFilled : ICONS.heart}</button>
+          </form>
+        </li>`;
+      })}
+    </ul></nav>`;
+  }
+
+  app.get<{ Querystring: { app?: string; sent?: string; enviada?: string; ideas?: string; shown?: string } }>('/apks', async (req, reply) => {
     reply.type('text/html; charset=utf-8');
     const uid = portalUser(req);
     if (uid === null) return reply.redirect('/', 303);
-    return renderPortal(req, uid, { sentTo: req.query.enviada });
+    const sent = req.query.sent ?? req.query.enviada;
+    return renderPortal(req, uid, {
+      app: req.query.app ?? sent,
+      sentTo: sent,
+      ideas: req.query.ideas,
+      shown: Number(req.query.shown) || undefined,
+    });
   });
 
   function versionPanel(a: App, b: Build, included: number) {
     return html`<div class="panel panel-version">
       <div class="row" style="justify-content:space-between; align-items:baseline">
-        <h3>Tu versión ${b.versionCode}</h3>
-        <span class="when">Publicada el ${fmtDay(b.createdAt)}</span>
+        <h3>Your version ${b.versionCode}</h3>
+        <span class="when">Published ${fmtDay(b.createdAt)}</span>
       </div>
-      <p class="muted">Trae ${included} ${included === 1 ? 'idea tuya' : 'ideas tuyas'} sobre la versión base. Se instala encima de la que
-        tienes, sin perder tus datos.</p>
+      <p class="muted">It has ${included} ${included === 1 ? 'idea of yours' : 'ideas of yours'} on top of the base version. It installs over
+        the one you have, without losing your data.</p>
       <div class="actions">
-        <a class="button" href="/apks/${a.slug}/latest.apk">${DOWNLOAD_ICON}Descargar versión ${b.versionCode}</a>
-        <details class="hint"><summary>¿Cómo instalarla?</summary>
-          <p>Si Android pregunta, permite que el navegador instale apps solo para esta instalación.</p>
+        <a class="button" href="/apks/${a.slug}/latest.apk">${ICONS.download}Download version ${b.versionCode}</a>
+        <details class="hint"><summary>How do I install it?</summary>
+          <p>If Android asks, let your browser install apps just for this install.</p>
         </details>
       </div>
     </div>`;
@@ -355,91 +424,122 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return html`<div class="panel-empty">
       ${SEED_BRANCH}
       <div>
-        <h3>Aún no tienes tu versión</h3>
-        <p>La tendrás cuando el dueño apruebe y publique tu primera idea. Mientras tanto, usa la versión base de ${a.name}.</p>
-        ${base && appPage(a.slug) ? html`<a class="button secondary" href="/apps/${a.slug}/apk">Descargar la versión base</a>` : ''}
+        <h3>You don't have your version yet</h3>
+        <p>You'll get it when the owner approves and publishes your first idea. Meanwhile, use the base version of ${a.name}.</p>
+        ${base && appPage(a.slug) ? html`<a class="button secondary" href="/apps/${a.slug}/apk">${ICONS.download}Download the base version</a>` : ''}
       </div>
     </div>`;
   }
 
-  function ideaPanel(a: App, firstIdea: boolean, primary: boolean, draft?: Draft) {
-    const fieldId = `idea-${a.slug}`;
-    const form = html`<form class="panel panel-idea" method="post" action="/apks/${a.slug}/requests">
-      <h3>${firstIdea ? 'Tu primera idea' : 'Nueva idea'}</h3>
-      <p class="muted">Una idea por solicitud. Si el dueño la aprueba, llega a tu versión.</p>
-      <label class="field" for="${fieldId}">¿Qué cambiarías de ${a.name}?</label>
+  function ideaPanel(current: App, apps: App[], firstIdea: boolean, primary: boolean, draft?: Draft) {
+    const fieldId = `idea-${current.slug}`;
+    const form = html`<form class="panel panel-idea" method="post" action="/apks/requests">
+      <h3>${firstIdea ? 'Your first idea' : 'New idea'}</h3>
+      <p class="muted">One idea per request. If the owner approves it, it reaches your version.</p>
+      ${apps.length > 1
+        ? html`<label class="field" for="${fieldId}-app">App</label>
+            <select id="${fieldId}-app" name="app" class="select">${apps.map(
+              (a) => html`<option value="${a.slug}" ${a.slug === current.slug ? 'selected' : ''}>${a.name}</option>`,
+            )}</select>`
+        : html`<input type="hidden" name="app" value="${current.slug}">`}
+      <label class="field" for="${fieldId}">What would you change?</label>
       <textarea id="${fieldId}" name="text" rows="6" minlength="${MIN_LENGTH}" maxlength="${MAX_LENGTH}" required
-        aria-describedby="${fieldId}-help" placeholder="Por ejemplo: agregar un modo oscuro"
+        aria-describedby="${fieldId}-help" placeholder="For example: add a dark mode"
         oninput="this.form.querySelector('.count').textContent = this.value.length + ' / ${MAX_LENGTH}'">${draft?.text ?? ''}</textarea>
       <div class="field-foot">
-        <span id="${fieldId}-help" class="hint">Entre ${MIN_LENGTH} y ${MAX_LENGTH} caracteres</span>
+        <span id="${fieldId}-help" class="hint">Between ${MIN_LENGTH} and ${MAX_LENGTH} characters</span>
         <span class="count hint" aria-hidden="true">${(draft?.text ?? '').length} / ${MAX_LENGTH}</span>
       </div>
-      <p class="public-note">${GLOBE_ICON}Tu idea y el código que genere serán públicos en GitHub. No escribas datos personales.</p>
-      ${draft ? html`<p class="error" role="alert">${draft.error}</p>` : ''}
-      <button class="${primary ? '' : 'secondary'}">Enviar idea</button>
+      <p class="public-note">${ICONS.globe}Your idea and the code it produces will be public on GitHub. Don't write personal data.</p>
+      ${draft ? html`<p class="error" role="alert">${errorMessage(draft.error)}</p>` : ''}
+      <button class="${primary ? '' : 'secondary'}">${ICONS.send}Send idea</button>
     </form>`;
     if (firstIdea || draft) return form;
-    return html`<details class="idea-toggle"><summary>${PLUS_ICON}Nueva idea</summary>${form}</details>`;
+    return html`<details class="idea-toggle"><summary>${ICONS.plus}New idea</summary>${form}</details>`;
   }
 
-  function branchTimeline(a: App, reqs: Request[], versionOf: (r: Request) => number | undefined) {
-    if (reqs.length === 0) return '';
+  function ideasSection(a: App, uid: number, view: PortalView, versionOf: (r: Request) => number | undefined) {
+    const total = countRequests(db, { userId: uid, appSlug: a.slug });
+    if (total === 0) return '';
+    const filter = IDEA_FILTERS.find((f) => f.key === view.ideas) ?? IDEA_FILTERS[0];
+    const shown = Math.min(Math.max(view.shown ?? IDEAS_PAGE, IDEAS_PAGE), 500);
+    const where = { userId: uid, appSlug: a.slug, statuses: filter.statuses };
+    const matching = countRequests(db, where);
+    const reqs = listRequests(db, { ...where, limit: shown });
     return html`<section class="branch" aria-labelledby="ideas-${a.slug}">
-      <h3 id="ideas-${a.slug}">Tus ideas</h3>
-      <ol class="timeline">
-        ${reqs.map((r) => {
-          const v = versionOf(r);
-          const off = ['failed', 'discarded', 'rejected'].includes(r.status);
-          const node = r.status === 'built' ? 'in' : off ? 'off' : '';
-          return html`<li>
-            <span class="node ${node}" aria-hidden="true">${off ? CROSS_ICON : ''}</span>
-            <div style="flex:1; min-width:0">
-              <div class="meta">
-                ${r.status === 'built'
-                  ? html`<span class="pill-in">${v ? `En tu versión ${v}` : USER_STATUS_LABEL.built}</span>`
-                  : html`<span class="status ${r.status}">${USER_STATUS_LABEL[r.status] ?? r.status}</span>`}
-                <span class="when">${fmtDay(r.createdAt)}</span>
-              </div>
-              <p class="idea ${off ? 'off-text' : ''}">${r.text}</p>
-              ${r.reason ? html`<p class="note">${r.reason}</p>` : ''}
-            </div>
-          </li>`;
-        })}
-        <li aria-hidden="true"><span class="node root"></span><p class="base">Parten de la versión base</p></li>
-      </ol>
+      <h3 id="ideas-${a.slug}">Your ideas</h3>
+      <nav class="filters" aria-label="Filter ideas">${IDEA_FILTERS.map(
+        (f) => html`<a href="${portalHref(a.slug, { ideas: f.key })}#ideas-${a.slug}" aria-current="${f.key === filter.key ? 'true' : 'false'}">${f.label}</a>`,
+      )}</nav>
+      ${reqs.length
+        ? html`<ol class="timeline">
+            ${reqs.map((r) => ideaItem(r, versionOf(r)))}
+            ${reqs.length === matching ? html`<li aria-hidden="true"><span class="node root"></span><p class="base">Built on the base version</p></li>` : ''}
+          </ol>`
+        : html`<p class="muted">No ideas here yet.</p>`}
+      ${reqs.length < matching
+        ? html`<div class="more-row"><span>Showing ${reqs.length} of ${matching}</span>
+            <a class="button secondary" href="${portalHref(a.slug, { ideas: filter.key, shown: shown + 10 })}#ideas-${a.slug}">${ICONS.more}Show older ideas</a></div>`
+        : ''}
     </section>`;
   }
 
-  function portalAppCard(a: App, uid: number, draft?: Draft) {
+  function ideaItem(r: Request, v: number | undefined) {
+    const off = ['failed', 'discarded', 'rejected'].includes(r.status);
+    const node = r.status === 'built' ? 'in' : off ? 'off' : '';
+    return html`<li>
+      <span class="node ${node}" aria-hidden="true">${off ? ICONS.cross : ''}</span>
+      <div style="flex:1; min-width:0">
+        <div class="meta">
+          ${r.status === 'built'
+            ? html`<span class="pill-in">${v ? `In your version ${v}` : USER_STATUS_LABEL.built}</span>`
+            : html`<span class="status ${r.status}">${USER_STATUS_LABEL[r.status] ?? r.status}</span>`}
+          <span class="when">${fmtDay(r.createdAt)}</span>
+        </div>
+        <p class="idea ${off ? 'off-text' : ''}">${r.text}</p>
+        ${r.reason ? html`<p class="note">${r.reason}</p>` : ''}
+      </div>
+    </li>`;
+  }
+
+  function portalAppCard(a: App, apps: App[], favorites: Set<string>, uid: number, view: PortalView) {
     const b = latestBuildFor(db, a, uid);
     const branch = userBranch(uid);
-    const reqs = listRequests(db, { userId: uid, appSlug: a.slug, limit: 8 });
     const versionOf = (r: Request) => (r.status === 'built' ? buildForRequest(db, r.id, branch)?.versionCode : undefined);
     const included = b
-      ? listRequests(db, { userId: uid, appSlug: a.slug, limit: 200 }).filter((r) => {
+      ? listRequests(db, { userId: uid, appSlug: a.slug, statuses: ['built'], limit: 500 }).filter((r) => {
           const v = versionOf(r);
           return v !== undefined && v <= b.versionCode;
         }).length
       : 0;
+    const hasIdeas = countRequests(db, { userId: uid, appSlug: a.slug }) > 0;
     const info = appPage(a.slug);
+    const fav = favorites.has(a.slug);
+    const draft = view.draft?.slug === a.slug ? view.draft : undefined;
     return html`
       <section class="app-block" aria-labelledby="app-${a.slug}">
         <div class="app-title">
           ${info ? html`<span class="app-icon">${info.icon}</span>` : ''}
           <h2 id="app-${a.slug}">${a.name}</h2>
-          ${info ? html`<a class="more" href="/apps/${a.slug}">Ver la app</a>` : ''}
+          ${apps.length === 1
+            ? html`<form method="post" action="/apks/${a.slug}/favorite">
+                <input type="hidden" name="favorite" value="${fav ? '0' : '1'}"><input type="hidden" name="back" value="/apks">
+                <button class="fav ${fav ? 'on' : ''}" aria-pressed="${fav ? 'true' : 'false'}"
+                  aria-label="${fav ? `Remove ${a.name} from favorites` : `Add ${a.name} to favorites`}">${fav ? ICONS.heartFilled : ICONS.heart}</button>
+              </form>`
+            : ''}
+          ${info ? html`<a class="more" href="/apps/${a.slug}">About the app</a>` : ''}
         </div>
         <div class="app-grid">
           ${b ? versionPanel(a, b, included) : emptyPanel(a)}
-          ${ideaPanel(a, reqs.length === 0, !b, draft)}
-          ${branchTimeline(a, reqs, versionOf)}
+          ${ideaPanel(a, apps, !hasIdeas, !b, draft)}
+          ${ideasSection(a, uid, view, versionOf)}
         </div>
       </section>`;
   }
 
   app.get<{ Querystring: { next?: string; app?: string } }>('/auth/google/start', async (req, reply) => {
-    if (!google) return reply.code(503).send('El inicio de sesión con Google no está configurado.');
+    if (!google) return reply.code(503).send('Google sign-in is not configured.');
     const next = LOGIN_NEXT.includes(req.query.next ?? '') ? (req.query.next as string) : '/apks';
     const appSlug = req.query.app && getApp(db, req.query.app) ? req.query.app : null;
     const start = createOAuthState(db, next, appSlug);
@@ -453,23 +553,23 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   app.get<{ Querystring: { code?: string; state?: string } }>('/auth/google/callback', async (req, reply) => {
     reply.type('text/html; charset=utf-8');
     const fail = (status: number, message: string) =>
-      reply.code(status).send(page('Cerebro', html`<div class="card"><p class="error">${message}</p><p><a href="/apks">Volver</a></p></div>`));
-    if (!google) return fail(503, 'El inicio de sesión con Google no está configurado.');
+      reply.code(status).send(page('Cerebro', html`<div class="card"><p class="error">${message}</p><p><a href="/">Go back</a></p></div>`));
+    if (!google) return fail(503, 'Google sign-in is not configured.');
     const blocked = blockedError(req.ip);
-    if (blocked) return fail(429, blocked);
+    if (blocked) return fail(429, 'Too many attempts. Try again in a few minutes.');
     const state = req.query.state ? consumeOAuthState(db, req.query.state, cookies(req)[OAUTH_COOKIE]) : null;
-    if (!state || !req.query.code) return fail(400, 'El inicio de sesión venció o no es válido. Intenta de nuevo.');
+    if (!state || !req.query.code) return fail(400, 'The sign-in expired or is not valid. Try again.');
     let identity: GoogleIdentity;
     try {
       const idToken = await google.exchange.exchange(req.query.code, state.verifier, `${config.publicUrl}/auth/google/callback`);
       identity = await google.verifier.verify(idToken, state.nonce);
     } catch {
       recordFailure(db, req.ip);
-      return fail(401, 'No se pudo verificar tu cuenta de Google.');
+      return fail(401, 'Your Google account could not be verified.');
     }
     clearFailures(db, req.ip);
     const res = startSession(identity, state.appSlug);
-    if (!res.ok) return fail(res.status, res.error);
+    if (!res.ok) return fail(res.status, res.status === 403 ? 'Your account is disabled.' : 'The admin account is not linked yet: run user:link on the server.');
     setCookie(reply, config, SESSION_COOKIE, res.token, config.sessionDays * 86400, '/');
     setCookie(reply, config, OAUTH_COOKIE, '', 0, OAUTH_COOKIE_PATH);
     return reply.redirect(state.next, 303);
@@ -481,16 +581,31 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return reply.redirect('/apks', 303);
   });
 
-  app.post<{ Params: { slug: string } }>('/apks/:slug/requests', async (req, reply) => {
+  async function submitIdea(req: FastifyRequest, reply: FastifyReply, slug: string) {
     const uid = portalUser(req);
-    if (uid === null || !userCanUseApp(db, uid, req.params.slug)) return reply.redirect('/apks', 303);
+    if (uid === null || !userCanUseApp(db, uid, slug)) return reply.redirect('/apks', 303);
     const text = String((req.body as { text?: unknown } | undefined)?.text ?? '');
-    const res = createRequest(db, uid, req.params.slug, text);
+    const res = createRequest(db, uid, slug, text);
     if (!res.ok) {
       reply.code(400).type('text/html; charset=utf-8');
-      return renderPortal(req, uid, { draft: { slug: req.params.slug, text, error: res.error } });
+      return renderPortal(req, uid, { draft: { slug, text, error: res.error } });
     }
-    return reply.redirect(`/apks?enviada=${encodeURIComponent(req.params.slug)}`, 303);
+    return reply.redirect(`/apks?app=${encodeURIComponent(slug)}&sent=${encodeURIComponent(slug)}`, 303);
+  }
+
+  app.post('/apks/requests', async (req, reply) =>
+    submitIdea(req, reply, String((req.body as { app?: unknown } | undefined)?.app ?? '')),
+  );
+
+  app.post<{ Params: { slug: string } }>('/apks/:slug/requests', async (req, reply) => submitIdea(req, reply, req.params.slug));
+
+  app.post<{ Params: { slug: string } }>('/apks/:slug/favorite', async (req, reply) => {
+    const uid = portalUser(req);
+    const body = (req.body ?? {}) as { favorite?: unknown; back?: unknown };
+    const back = body.back === '/admin' ? '/admin' : '/apks';
+    if (uid !== null && back === '/admin' && isAdmin(req) && getApp(db, req.params.slug)) grantApps(db, uid, [req.params.slug]);
+    if (uid !== null) setFavorite(db, uid, req.params.slug, body.favorite === '1');
+    return reply.redirect(`${back}?app=${encodeURIComponent(req.params.slug)}`, 303);
   });
 
   app.get<{ Params: { slug: string }; Querystring: { dl?: string } }>('/apks/:slug/latest.apk', async (req, reply) => {
@@ -498,11 +613,11 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     let uid = portalUser(req);
     if (uid === null && req.query.dl) uid = useDownloadToken(db, req.query.dl, slug);
     const a = getApp(db, slug);
-    if (uid === null || !a || !userCanUseApp(db, uid, slug)) return reply.code(404).send('No encontrado');
+    if (uid === null || !a || !userCanUseApp(db, uid, slug)) return reply.code(404).send('Not found');
     const b = latestBuildFor(db, a, uid);
-    if (!b) return reply.code(404).send('Todavía no tienes una versión propia de esta app.');
+    if (!b) return reply.code(404).send("You don't have your own version of this app yet.");
     const file = path.join(config.apksDir, slug, b.apkFile);
-    if (!fs.existsSync(file)) return reply.code(404).send('El archivo del APK no está en el servidor.');
+    if (!fs.existsSync(file)) return reply.code(404).send('The APK file is not on the server.');
     reply
       .type('application/vnd.android.package-archive')
       .header('content-disposition', `attachment; filename="${slug}-v${b.versionCode}.apk"`)
@@ -518,52 +633,116 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return !!s?.isAdmin && isAdminEmail(config, getUser(db, s.userId)?.email);
   }
 
-  app.get('/admin', async (req, reply) => {
+  const HISTORY_FILTERS: { key: string; label: string; statuses: RequestStatus[] }[] = [
+    { key: 'all', label: 'All', statuses: ['built', 'failed', 'discarded', 'rejected'] },
+    { key: 'built', label: 'Built', statuses: ['built'] },
+    { key: 'failed', label: 'Failed', statuses: ['failed'] },
+    { key: 'discarded', label: 'Discarded', statuses: ['discarded'] },
+    { key: 'rejected', label: 'Rejected', statuses: ['rejected'] },
+  ];
+  const HISTORY_PAGE = 10;
+
+  function adminHref(appSlug: string | undefined, extra: Record<string, string | number> = {}): string {
+    const q = new URLSearchParams(Object.entries({ ...(appSlug ? { app: appSlug } : {}), ...extra }).map(([k, v]) => [k, String(v)]));
+    const qs = q.toString();
+    return qs ? `/admin?${qs}` : '/admin';
+  }
+
+  app.get<{ Querystring: { app?: string; hist?: string; shown?: string } }>('/admin', async (req, reply) => {
     reply.type('text/html; charset=utf-8');
     if (!isAdmin(req)) {
       if (portalUser(req) !== null) {
         reply.code(403);
-        return page('Cerebro · admin', html`<div class="card">Tu cuenta no es de administrador. <a href="/apks">Volver</a></div>`);
+        return page('Admin · Cerebro', html`<div class="card">Your account is not an admin. <a href="/apks">Go to your apps</a></div>`);
       }
-      return page('Cerebro · admin', loginPage('Administración', '/admin', google !== undefined));
+      return page('Admin · Cerebro', loginPage('Admin', '/admin', google !== undefined));
     }
-    const all = listRequests(db, { limit: 60 });
-    const pending = all.filter((r) => r.status === 'pending');
-    const review = all.filter((r) => r.status === 'review');
-    const queue = all.filter((r) => r.status === 'approved' || r.status === 'running');
-    const done = all.filter((r) => !['pending', 'approved', 'running', 'review'].includes(r.status));
+    const adminId = portalUser(req)!;
+    const favorites = favoriteApps(db, adminId);
+    const pendingBy = new Map<string, number>();
+    for (const r of listRequests(db, { statuses: ['pending', 'review'], limit: 500 })) {
+      pendingBy.set(r.appSlug, (pendingBy.get(r.appSlug) ?? 0) + 1);
+    }
+    const apps = listApps(db).sort(
+      (x, y) =>
+        Number(favorites.has(y.slug)) - Number(favorites.has(x.slug)) ||
+        (pendingBy.get(y.slug) ?? 0) - (pendingBy.get(x.slug) ?? 0) ||
+        x.name.localeCompare(y.name),
+    );
+    const current = apps.find((a) => a.slug === req.query.app);
+    const appSlug = current?.slug;
+    const pending = listRequests(db, { appSlug, statuses: ['pending'], limit: 100 });
+    const review = listRequests(db, { appSlug, statuses: ['review'], limit: 100 });
+    const queue = listRequests(db, { appSlug, statuses: ['approved', 'running'], limit: 100 });
+    const histFilter = HISTORY_FILTERS.find((f) => f.key === req.query.hist) ?? HISTORY_FILTERS[0];
+    const shown = Math.min(Math.max(Number(req.query.shown) || HISTORY_PAGE, HISTORY_PAGE), 500);
+    const histWhere = { appSlug, statuses: histFilter.statuses };
+    const histTotal = countRequests(db, histWhere);
+    const history = listRequests(db, { ...histWhere, limit: shown });
+    const historyOpen = req.query.hist !== undefined || req.query.shown !== undefined;
     return page(
-      'Cerebro · admin',
+      'Admin · Cerebro',
       html`
         <header class="topbar">
-          <a class="brand" href="/admin">${BRAND_MARK}Cerebro</a>
+          <a class="brand" href="/apks">${BRAND_MARK}Cerebro</a>
           <div class="row">
-            <a class="button secondary" href="/apks">Mis APKs</a>
-            <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
+            <a class="button secondary" href="/apks">${ICONS.apps}Your apps</a>
+            <form method="post" action="/apks/logout"><button class="secondary">${ICONS.signOut}Sign out</button></form>
           </div>
         </header>
-        <h1>Administración</h1>
-        <section class="card"><h2>Por aprobar (${pending.length})</h2>
-          ${pending.length ? html`<ul class="list">${pending.map(adminPendingItem)}</ul>` : html`<p class="muted">Nada pendiente.</p>`}
+        <h1>Admin</h1>
+        ${apps.length > 1
+          ? html`<nav aria-label="Filter by app"><ul class="switcher">
+              <li class="${current ? '' : 'current'}"><a href="/admin" aria-current="${current ? 'false' : 'page'}" style="padding-right:14px">
+                <span class="app-icon">${ICONS.apps}</span>All apps</a></li>
+              ${apps.map((a) => adminAppChip(a, favorites.has(a.slug), a.slug === appSlug, pendingBy.get(a.slug) ?? 0))}
+            </ul></nav>`
+          : ''}
+        <section class="card"><h2>Pending approval (${pending.length})</h2>
+          ${pending.length ? html`<ul class="list">${pending.map(adminPendingItem)}</ul>` : html`<p class="muted">Nothing pending.</p>`}
         </section>
         ${review.length
-          ? html`<section class="card"><h2>Por revisar (${review.length})</h2>
-              <p class="muted">Solicitudes forzadas: pasaron las pruebas en el sandbox. Lee los cambios antes de publicarlas.</p>
+          ? html`<section class="card"><h2>To review (${review.length})</h2>
+              <p class="muted">Forced requests that passed the sandbox tests. Read the changes before publishing them.</p>
               <ul class="list">${review.map(adminReviewItem)}</ul></section>`
           : ''}
         ${queue.length
-          ? html`<section class="card"><h2>En cola o programándose (${queue.length})</h2>
-              <p class="hint">La página se actualiza sola cada ${ADMIN_REFRESH_SEC} s, salvo mientras escribes.</p>
+          ? html`<section class="card"><h2>Queued or building (${queue.length})</h2>
+              <p class="hint">This page refreshes every ${ADMIN_REFRESH_SEC} s, except while you type.</p>
               <ul class="list">${queue.map((r) => adminHistoryItem(r, true))}</ul></section>`
           : ''}
-        ${listApps(db).map(adminBuildsCard)}
-        <section class="card"><h2>Historial</h2>
-          ${done.length ? html`<ul class="list">${done.map((r) => adminHistoryItem(r))}</ul>` : html`<p class="muted">Sin historial.</p>`}
-        </section>
+        ${(current ? [current] : apps).map((a) => adminBuildsCard(a, !!current))}
+        <details class="card fold" ${historyOpen ? 'open' : ''} id="history">
+          <summary><h2>History (${countRequests(db, { appSlug, statuses: HISTORY_FILTERS[0].statuses })})</h2>${ICONS.more}</summary>
+          <nav class="filters" aria-label="Filter history">${HISTORY_FILTERS.map(
+            (f) => html`<a href="${adminHref(appSlug, { hist: f.key })}#history" aria-current="${f.key === histFilter.key ? 'true' : 'false'}">${f.label}</a>`,
+          )}</nav>
+          ${history.length ? html`<ul class="list">${history.map((r) => adminHistoryItem(r))}</ul>` : html`<p class="muted">Nothing here.</p>`}
+          ${history.length < histTotal
+            ? html`<div class="more-row"><span>Showing ${history.length} of ${histTotal}</span>
+                <a class="button secondary" href="${adminHref(appSlug, { hist: histFilter.key, shown: shown + HISTORY_PAGE })}#history">${ICONS.more}Show older</a></div>`
+            : ''}
+        </details>
       `,
       { refreshSec: queue.length ? ADMIN_REFRESH_SEC : undefined },
     );
   });
+
+  function adminAppChip(a: App, fav: boolean, current: boolean, pendingCount: number) {
+    const info = appPage(a.slug);
+    return html`<li class="${current ? 'current' : ''}">
+      <a href="/admin?app=${encodeURIComponent(a.slug)}" aria-current="${current ? 'page' : 'false'}">
+        <span class="app-icon">${info ? info.icon : ICONS.apps}</span>${a.name}${pendingCount
+          ? html`<span class="count" aria-label="${pendingCount} waiting">${pendingCount}</span>`
+          : ''}
+      </a>
+      <form method="post" action="/apks/${a.slug}/favorite">
+        <input type="hidden" name="favorite" value="${fav ? '0' : '1'}"><input type="hidden" name="back" value="/admin">
+        <button class="fav ${fav ? 'on' : ''}" aria-pressed="${fav ? 'true' : 'false'}"
+          aria-label="${fav ? `Remove ${a.name} from favorites` : `Add ${a.name} to favorites`}">${fav ? ICONS.heartFilled : ICONS.heart}</button>
+      </form>
+    </li>`;
+  }
 
   function authorIsAdmin(r: Request): boolean {
     return r.userId !== null && isAdminEmail(config, getUser(db, r.userId)?.email);
@@ -577,21 +756,21 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     const risky = r.flags.length > 0;
     const rejectForm = `reject-${r.id}`;
     return html`<li>
-      <div><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">de ${r.userName ?? 'sistema'}, ${fmtDate(r.createdAt)}</span></div>
+      <div><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}, ${fmtDate(r.createdAt)}</span></div>
       <p>${r.text}</p>
-      ${r.flags.map((f) => html`<div class="flag" role="note">⚠ ${f}</div>`)}
+      ${r.flags.map((f) => html`<div class="flag" role="note">⚠ ${flagLabel(f)}</div>`)}
       <div class="decide">
         <form id="${rejectForm}" method="post" action="/admin/requests/${r.id}/reject"></form>
-        <label class="field" for="reason-${r.id}" style="margin:0">Motivo si la rechazas (opcional)</label>
-        <input id="reason-${r.id}" form="${rejectForm}" type="text" name="reason" placeholder="Por ejemplo: no es parte de esta app">
+        <label class="field" for="reason-${r.id}" style="margin:0">Reason if you reject it (optional)</label>
+        <input id="reason-${r.id}" form="${rejectForm}" type="text" name="reason" placeholder="For example: not part of this app">
         <div class="row">
           <form method="post" action="/admin/requests/${r.id}/approve" class="row">
             ${authorIsAdmin(r)
-              ? html`<label class="row"><input type="checkbox" name="alsoMain" value="on" style="width:auto"> También a main</label>`
+              ? html`<label class="row"><input type="checkbox" name="alsoMain" value="on" style="width:auto"> Also to main</label>`
               : ''}
-            <button class="${risky ? 'secondary' : ''}">Aprobar #${r.id}</button>
+            <button class="${risky ? 'secondary' : ''}">${ICONS.check}Approve #${r.id}</button>
           </form>
-          <button form="${rejectForm}" class="${risky ? 'danger' : 'quiet'}">Rechazar #${r.id}</button>
+          <button form="${rejectForm}" class="${risky ? 'danger' : 'quiet'}">${ICONS.x}Reject #${r.id}</button>
         </div>
       </div>
     </li>`;
@@ -599,16 +778,16 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
 
   function adminReviewItem(r: Request) {
     return html`<li>
-      <div><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">de ${r.userName ?? 'sistema'}</span></div>
-      <p class="target">Va a main y a ${r.branch}.</p>
+      <div><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}</span></div>
+      <p class="target">Goes to main and to ${r.branch}.</p>
       <p>${r.text}</p>
       ${r.reason ? html`<p class="muted">${r.reason}</p>` : ''}
-      <details open><summary>Cambios en el código</summary><pre class="diff">${renderDiff(r.reviewPatch ?? '')}</pre></details>
+      <details open><summary>Code changes</summary><pre class="diff">${renderDiff(r.reviewPatch ?? '')}</pre></details>
       ${r.log ? html`<details><summary class="muted">Log</summary><pre>${r.log}</pre></details>` : ''}
       <div class="row">
-        <form method="post" action="/admin/requests/${r.id}/publish"><button>Publicar en main y ${r.branch}</button></form>
+        <form method="post" action="/admin/requests/${r.id}/publish"><button>${ICONS.publish}Publish to main and ${r.branch}</button></form>
         <form method="post" action="/admin/requests/${r.id}/discard"
-          onsubmit="return confirm('¿Descartar #${r.id}? El cambio no llegará al repo.')"><button class="quiet">Descartar #${r.id}</button></form>
+          onsubmit="return confirm('Discard #${r.id}? The change will not reach the repo.')"><button class="quiet">${ICONS.x}Discard #${r.id}</button></form>
       </div>
     </li>`;
   }
@@ -617,27 +796,28 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     const forceable = r.kind === 'change' && (r.status === 'failed' || r.status === 'discarded');
     return html`<li>
       <div class="row" style="justify-content:space-between">
-        <span><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">de ${r.userName ?? 'sistema'}, ${r.branch}${r.alsoMain ? ' y main' : ''}</span></span>
+        <span><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}, ${r.branch}${r.alsoMain ? ' and main' : ''}</span></span>
         <span class="status ${r.status}">${STATUS_LABEL[r.status]}</span>
       </div>
       <div>${r.text}</div>
       ${r.reason ? html`<div class="muted">${r.reason}</div>` : ''}
       ${r.log ? html`<details ${openLog ? 'open' : ''}><summary class="muted">Log</summary><pre>${r.log}</pre></details>` : ''}
       ${forceable
-        ? html`<details class="confirm"><summary>Forzar…</summary>
-            <p>Vuelve a programar #${r.id} con el núcleo, las dependencias y los permisos de Android desbloqueados. Va a
-              main, para todos. Antes de publicar vas a revisar los cambios.</p>
-            <form method="post" action="/admin/requests/${r.id}/force"><button class="danger">Forzar #${r.id}</button></form>
+        ? html`<details class="confirm"><summary>${ICONS.bolt}Force…</summary>
+            <p>Builds #${r.id} again with the core, dependencies and Android permissions unlocked. It goes to main, for
+              everyone. You will review the changes before publishing.</p>
+            <form method="post" action="/admin/requests/${r.id}/force"><button class="danger">${ICONS.bolt}Force #${r.id}</button></form>
           </details>`
         : ''}
     </li>`;
   }
 
-  function adminBuildsCard(a: App) {
+  function adminBuildsCard(a: App, open: boolean) {
     const byBranch = new Map<string, Build[]>();
     for (const b of listBuilds(db, a.slug, 40)) byBranch.set(b.branch, [...(byBranch.get(b.branch) ?? []), b]);
     const branches = [...byBranch.keys()].sort((x, y) => (x === a.branch ? -1 : y === a.branch ? 1 : x.localeCompare(y)));
-    return html`<section class="card"><h2>APKs de ${a.name}</h2>
+    return html`<details class="card fold" ${open ? 'open' : ''}>
+      <summary><h2>${a.name} APKs</h2>${ICONS.more}</summary>
       ${branches.length
         ? branches.map(
             (branch) => html`<h3>${branch}</h3><ul class="list">${byBranch
@@ -646,19 +826,19 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
               .map(
                 (b, i) => html`<li class="row" style="justify-content:space-between">
                   <span>v${b.versionCode} <span class="muted">${b.commitSha.slice(0, 7)}, ${fmtDate(b.createdAt)}</span>
-                    ${i === 0 ? html` <span class="status built">actual</span>` : ''}</span>
+                    ${i === 0 ? html` <span class="status built">current</span>` : ''}</span>
                   <form method="post" action="/admin/builds/${b.id}/revert"
-                    onsubmit="return confirm('¿Revertir v${b.versionCode} en ${branch}? Se crea un commit nuevo y un APK nuevo.')">
-                    <button class="secondary">Revertir v${b.versionCode}</button></form>
+                    onsubmit="return confirm('Revert v${b.versionCode} on ${branch}? This makes a new commit and a new APK.')">
+                    <button class="secondary">${ICONS.undo}Revert v${b.versionCode}</button></form>
                 </li>`,
               )}</ul>`,
           )
-        : html`<p class="muted">Sin builds todavía.</p>`}
-    </section>`;
+        : html`<p class="muted">No builds yet.</p>`}
+    </details>`;
   }
 
   app.post<{ Params: { id: string } }>('/admin/requests/:id/approve', async (req, reply) => {
-    if (!isAdmin(req)) return reply.code(403).send('Prohibido');
+    if (!isAdmin(req)) return reply.code(403).send('Forbidden');
     const r = getRequest(db, Number(req.params.id));
     const alsoMain = (req.body as { alsoMain?: unknown } | undefined)?.alsoMain === 'on' && !!r && authorIsAdmin(r);
     if (r && decideRequest(db, r.id, { approve: true, alsoMain })) wakeWorker?.();
@@ -666,14 +846,14 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   });
 
   app.post<{ Params: { id: string } }>('/admin/requests/:id/reject', async (req, reply) => {
-    if (!isAdmin(req)) return reply.code(403).send('Prohibido');
+    if (!isAdmin(req)) return reply.code(403).send('Forbidden');
     const reason = String((req.body as { reason?: unknown } | undefined)?.reason ?? '').trim();
     decideRequest(db, Number(req.params.id), { approve: false, reason: reason || null });
     return reply.redirect('/admin', 303);
   });
 
   app.post<{ Params: { id: string } }>('/admin/requests/:id/force', async (req, reply) => {
-    if (!isAdmin(req)) return reply.code(403).send('Prohibido');
+    if (!isAdmin(req)) return reply.code(403).send('Forbidden');
     const id = Number(req.params.id);
     if (forceRequest(db, id)) {
       appendLog(db, id, 'Forzada por el admin: núcleo, dependencias y permisos de Android desbloqueados; pide revisión antes de publicar');
@@ -683,19 +863,19 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   });
 
   app.post<{ Params: { id: string } }>('/admin/requests/:id/publish', async (req, reply) => {
-    if (!isAdmin(req)) return reply.code(403).send('Prohibido');
+    if (!isAdmin(req)) return reply.code(403).send('Forbidden');
     if (decideReview(db, Number(req.params.id), true)) wakeWorker?.();
     return reply.redirect('/admin', 303);
   });
 
   app.post<{ Params: { id: string } }>('/admin/requests/:id/discard', async (req, reply) => {
-    if (!isAdmin(req)) return reply.code(403).send('Prohibido');
+    if (!isAdmin(req)) return reply.code(403).send('Forbidden');
     decideReview(db, Number(req.params.id), false);
     return reply.redirect('/admin', 303);
   });
 
   app.post<{ Params: { id: string } }>('/admin/builds/:id/revert', async (req, reply) => {
-    if (!isAdmin(req)) return reply.code(403).send('Prohibido');
+    if (!isAdmin(req)) return reply.code(403).send('Forbidden');
     const b = getBuild(db, Number(req.params.id));
     if (b) {
       createRevertRequest(db, b);
@@ -712,7 +892,7 @@ function loginPage(title: string, next: string, enabled: boolean) {
     <header class="topbar"><a class="brand" href="/">${BRAND_MARK}Cerebro</a></header>
     <h1>${title}</h1>
     <div class="card">
-      <p class="muted">Solo pueden entrar las cuentas de Google autorizadas como administradoras.</p>
-      ${enabled ? signInButton(next) : html`<p class="error">El inicio de sesión con Google no está configurado.</p>`}
+      <p class="muted">Only Google accounts authorized as admins can sign in.</p>
+      ${enabled ? signInButton(next) : html`<p class="error">Google sign-in is not configured.</p>`}
     </div>`;
 }

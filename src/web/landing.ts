@@ -4,6 +4,7 @@ import type { AppPage } from './catalog.ts';
 import { APP_PAGES } from './catalog.ts';
 import type { Raw } from './html.ts';
 import { html, raw } from './html.ts';
+import { ICONS } from './icons.ts';
 
 const GITHUB_URL = 'https://github.com/iam-oov';
 const APP_VERSION = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
@@ -22,7 +23,7 @@ export const GOOGLE_G = raw(`<svg class="g-logo" viewBox="0 0 48 48" aria-hidden
 </svg>`);
 
 const BRANCHES = raw(`<svg class="branches" viewBox="0 0 420 356" role="img"
-  aria-label="Tu versión de la app sale de la versión base como una rama propia, con los cambios que pediste.">
+  aria-label="Your version of the app grows out of the base version as a branch of its own, with the changes you asked for.">
   <g fill="none" stroke-linecap="round">
     <path class="trunk draw" d="M60 20V320" stroke-width="6"/>
     <path class="other draw" d="M60 200c0 40 70 30 70 70v50" stroke-width="4"/>
@@ -35,30 +36,34 @@ const BRANCHES = raw(`<svg class="branches" viewBox="0 0 420 356" role="img"
     <circle class="ghost" cx="130" cy="292" r="7"/>
     <circle class="node" cx="230" cy="214" r="10"/>
     <circle class="node" cx="230" cy="282" r="10"/>
-    <text class="faint" x="76" y="34">versión base</text>
-    <text x="246" y="166">tu versión</text>
-    <text x="250" y="219">Modo oscuro</text>
-    <text x="250" y="287">Botón de micrófono</text>
-    <text class="faint" x="130" y="348" text-anchor="middle">otra persona</text>
+    <text class="faint" x="76" y="34">base version</text>
+    <text x="246" y="166">your version</text>
+    <text x="250" y="219">Dark mode</text>
+    <text x="250" y="287">Microphone button</text>
+    <text class="faint" x="130" y="348" text-anchor="middle">someone else</text>
   </g>
 </svg>`);
 
-export function signInButton(next: string, label = 'Entrar con Google'): Raw {
+export function signInButton(next: string, label = 'Sign in with Google'): Raw {
   return html`<a class="button" href="/auth/google/start?next=${encodeURIComponent(next)}">${GOOGLE_G}${label}</a>`;
 }
 
-export function topbar(signInEnabled: boolean): Raw {
+export function topbar(signInEnabled: boolean, signedIn = false): Raw {
   return html`<header class="topbar">
-    <a class="brand" href="/">${BRAND_MARK}Cerebro</a>
-    ${signInEnabled ? html`<a class="button secondary" href="/auth/google/start?next=%2Fapks">Entrar</a>` : ''}
+    <a class="brand" href="${signedIn ? '/apks' : '/'}">${BRAND_MARK}Cerebro</a>
+    ${signedIn
+      ? html`<a class="button secondary" href="/apks">${ICONS.apps}Your apps</a>`
+      : signInEnabled
+        ? html`<a class="button secondary" href="/auth/google/start?next=%2Fapks">${ICONS.login}Sign in</a>`
+        : ''}
   </header>`;
 }
 
 export function footer(): Raw {
   return html`<footer class="footer">
     <span>v${APP_VERSION}</span>
-    <span>Cerebro es un proyecto personal de <a href="${GITHUB_URL}">Osvaldo Hinojosa</a> 🧡</span>
-    <a href="/privacidad">Privacidad</a>
+    <span>Cerebro is a personal project by <a href="${GITHUB_URL}">Osvaldo Hinojosa</a> 🧡</span>
+    <a href="/privacy">Privacy</a>
   </footer>`;
 }
 
@@ -73,55 +78,55 @@ function appLink(a: AppPage): Raw {
 export function landingPage(signInEnabled: boolean): Raw {
   const cta = signInEnabled
     ? signInButton('/apks')
-    : html`<p class="error">El inicio de sesión con Google no está configurado.</p>`;
+    : html`<p class="error">Google sign-in is not configured.</p>`;
   return html`
     ${topbar(signInEnabled)}
 
     <section class="hero">
       <div>
-        <h1>Tu app, con los cambios que tú pides.</h1>
+        <h1>Your app, with the changes you ask for.</h1>
         <p class="lead">
-          Cerebro recibe las ideas de quienes usan una app, como Jeep OBD2. Si el dueño aprueba tu idea, una IA la
-          programa, se prueba y te llega como tu propia versión de la app.
+          Cerebro collects ideas from the people who use an app, like Jeep OBD2. If the owner approves your idea, an AI
+          builds it, tests it and delivers it as your own version of the app.
         </p>
         ${cta}
-        <p class="muted note">Solo usamos tu nombre y tu correo de Google.</p>
+        <p class="muted note">We only use your Google name and email.</p>
       </div>
       ${BRANCHES}
     </section>
 
     <section class="section">
-      <h2>Las apps de Cerebro</h2>
+      <h2>Cerebro's apps</h2>
       <div class="apps">${APP_PAGES.map(appLink)}</div>
       <p class="scope muted">
-        Cerebro solo funciona con las apps de este proyecto. No sirve para apps de la Play Store ni de otros
-        desarrolladores: solo puede cambiar el código de las apps que viven aquí.
+        Cerebro only works with this project's apps. It does not work with Play Store apps or apps from other
+        developers: it can only change the code of the apps that live here.
       </p>
     </section>
 
     <section class="section">
-      <h2>Cómo funciona</h2>
+      <h2>How it works</h2>
       <ol class="steps">
-        <li><strong>Escribe tu idea</strong>Desde el botón de sugerencias de la app o desde esta página. Hasta 280 caracteres.</li>
-        <li><strong>El dueño la revisa</strong>Nada se programa sin su aprobación.</li>
-        <li><strong>Una IA la programa y la prueba</strong>Si las pruebas o la compilación fallan, no se publica nada.</li>
-        <li><strong>Descargas tu versión</strong>Tus cambios viven en tu propia rama. Los de otras personas no te afectan.</li>
+        <li><strong>Write your idea</strong>From the app's suggestions button or from this page. Up to 280 characters.</li>
+        <li><strong>The owner reviews it</strong>Nothing gets built without their approval.</li>
+        <li><strong>An AI builds and tests it</strong>If the tests or the build fail, nothing is published.</li>
+        <li><strong>Download your version</strong>Your changes live in your own branch. Other people's changes don't affect you.</li>
       </ol>
     </section>
 
     <section class="section">
-      <h2>Lo que no cambia</h2>
+      <h2>What never changes</h2>
       <div class="promises">
-        <p><strong>El núcleo está protegido</strong>Las partes esenciales de cada app quedan fuera del alcance de cualquier solicitud.</p>
-        <p><strong>Todo es público</strong>Tus solicitudes y el código de tu versión están en <a href="${GITHUB_URL}">GitHub</a>. No escribas datos personales.</p>
-        <p><strong>El código nuevo corre aislado</strong>Las pruebas corren sin internet y sin acceso a llaves ni contraseñas.</p>
+        <p><strong>The core is protected</strong>The essential parts of each app are out of reach for any request.</p>
+        <p><strong>Everything is public</strong>Your ideas and your version's code are on <a href="${GITHUB_URL}">GitHub</a>. Don't write personal data.</p>
+        <p><strong>New code runs isolated</strong>Tests run without internet and without access to keys or passwords.</p>
       </div>
     </section>
 
     ${signInEnabled
       ? html`<section class="closing">
-          <h2>¿Tienes una idea para una de estas apps?</h2>
-          <p class="muted">Entra con tu cuenta de Google y envíala. Te avisamos aquí cuando esté lista tu versión.</p>
+          <h2>Have an idea for one of these apps?</h2>
+          <p class="muted">Sign in with your Google account and send it. You'll see here when your version is ready.</p>
           ${signInButton('/apks')}
         </section>`
       : ''}
@@ -130,60 +135,60 @@ export function landingPage(signInEnabled: boolean): Raw {
   `;
 }
 
-export function appDetailPage(a: AppPage, hasBuild: boolean, signInEnabled: boolean): Raw {
+export function appDetailPage(a: AppPage, hasBuild: boolean, signInEnabled: boolean, signedIn: boolean): Raw {
   return html`
-    ${topbar(signInEnabled)}
+    ${topbar(signInEnabled, signedIn)}
     <article class="prose">
       <div class="row"><span class="app-icon">${a.icon}</span><h1>${a.name}</h1></div>
       <p class="lead">${a.summary}</p>
       ${hasBuild
-        ? html`<p><a class="button" href="/apps/${a.slug}/apk" download>Descargar ${a.name} para Android</a></p>
-            <p class="hint">Es la versión base. Al abrirla, entra con Google; desde el botón de sugerencias puedes pedir
-              cambios y recibir tu propia versión.</p>`
-        : html`<p class="muted">Todavía no hay un APK publicado de ${a.name}.</p>`}
-      <details class="hint"><summary>¿Cómo instalar un APK?</summary>
-        <p>La app no está en la Play Store. Al abrir el archivo descargado, Android te pedirá permitir que el navegador
-          instale apps. Acepta solo para esta instalación; después puedes volver a desactivarlo.</p>
+        ? html`<p><a class="button" href="/apps/${a.slug}/apk" download>${ICONS.download}Download ${a.name} for Android</a></p>
+            <p class="hint">This is the base version. When you open it, sign in with Google; from the suggestions button you
+              can ask for changes and get your own version.</p>`
+        : html`<p class="muted">There is no published APK of ${a.name} yet.</p>`}
+      <details class="hint"><summary>How do I install an APK?</summary>
+        <p>The app is not on the Play Store. When you open the downloaded file, Android will ask you to let your browser
+          install apps. Allow it just for this install; you can turn it off again afterwards.</p>
       </details>
-      <h2>Qué hace</h2>
+      <h2>What it does</h2>
       <ul class="facts">${a.features.map((f) => html`<li>${f}</li>`)}</ul>
-      <h2>Qué necesitas</h2>
+      <h2>What you need</h2>
       <ul class="facts">${a.requirements.map((f) => html`<li>${f}</li>`)}</ul>
     </article>
     ${footer()}
   `;
 }
 
-export function privacyPage(signInEnabled: boolean): Raw {
+export function privacyPage(signInEnabled: boolean, signedIn: boolean): Raw {
   return html`
-    ${topbar(signInEnabled)}
+    ${topbar(signInEnabled, signedIn)}
     <article class="prose">
-      <h1>Privacidad</h1>
-      <p class="muted">Cerebro (cerebro.valdoh.com) y sus apps. Última actualización: 21 de noviembre de 2026.</p>
+      <h1>Privacy</h1>
+      <p class="muted">Cerebro (cerebro.valdoh.com) and its apps. Last updated: November 21, 2026.</p>
 
-      <h2>Qué datos guardamos</h2>
+      <h2>What we store</h2>
       <ul>
-        <li>De tu cuenta de Google: tu nombre, tu correo y el identificador de tu cuenta. No pedimos acceso a nada más.</li>
-        <li>Las ideas que envías, su estado y las versiones de la app que se generan para ti.</li>
-        <li>Una cookie de sesión para que no tengas que entrar cada vez.</li>
+        <li>From your Google account: your name, your email and your account ID. We ask for nothing else.</li>
+        <li>The ideas you send, their status and the versions of the app built for you.</li>
+        <li>A session cookie so you don't have to sign in every time.</li>
       </ul>
 
-      <h2>Qué es público</h2>
-      <p>El texto de tus ideas no lleva tu nombre, pero el código que se genera a partir de ellas se publica en GitHub,
-        en una rama con tu número de usuario. Por eso no debes escribir datos personales en tus ideas.</p>
+      <h2>What is public</h2>
+      <p>The text of your ideas does not carry your name, but the code built from them is published on GitHub, in a
+        branch named after your user number. That is why you should not write personal data in your ideas.</p>
 
-      <h2>Para qué los usamos</h2>
-      <p>Solo para que puedas entrar, enviar ideas y descargar tu versión. No vendemos ni compartimos tus datos, no hay
-        publicidad y no usamos rastreadores. Las ideas aprobadas se envían a Anthropic (Claude) para programarlas.</p>
+      <h2>What we use it for</h2>
+      <p>Only to let you sign in, send ideas and download your version. We don't sell or share your data, there are no
+        ads and no trackers. Approved ideas are sent to Anthropic (Claude) to be built.</p>
 
-      <h2>En las apps</h2>
-      <p>Jeep OBD2 guarda tus vehículos y tus llaves de API solo en tu teléfono, cifradas. Las llaves solo se envían a
-        Anthropic y a YouTube cuando buscas videos de reparación.</p>
+      <h2>In the apps</h2>
+      <p>Jeep OBD2 keeps your vehicles and your API keys only on your phone, encrypted. The keys are only sent to
+        Anthropic and YouTube when you search for repair videos.</p>
 
-      <h2>Dónde viven y cómo borrarlos</h2>
-      <p>Los datos están en un servidor propio. Para borrar tu cuenta y tus datos, escribe a
-        <a href="mailto:osvaldo.javier14@gmail.com">osvaldo.javier14@gmail.com</a>. El código ya publicado en GitHub
-        se puede eliminar junto con tu rama.</p>
+      <h2>Where it lives and how to delete it</h2>
+      <p>The data is on a private server. To delete your account and your data, write to
+        <a href="mailto:osvaldo.javier14@gmail.com">osvaldo.javier14@gmail.com</a>. Code already published on GitHub can
+        be removed along with your branch.</p>
     </article>
     ${footer()}
   `;

@@ -134,10 +134,27 @@ export function appsForUser(db: Db, userId: number): App[] {
     db
       .prepare(
         `SELECT a.* FROM apps a JOIN user_apps ua ON ua.app_slug = a.slug
-         WHERE ua.user_id = ? ORDER BY a.name`,
+         WHERE ua.user_id = ?
+         ORDER BY ua.favorite DESC,
+           (SELECT MAX(r.created_at) FROM requests r WHERE r.user_id = ua.user_id AND r.app_slug = a.slug) DESC,
+           a.name`,
       )
       .all(userId) as AppRow[]
   ).map(toApp);
+}
+
+export function favoriteApps(db: Db, userId: number): Set<string> {
+  const rows = db.prepare('SELECT app_slug FROM user_apps WHERE user_id = ? AND favorite = 1').all(userId) as {
+    app_slug: string;
+  }[];
+  return new Set(rows.map((r) => r.app_slug));
+}
+
+export function setFavorite(db: Db, userId: number, slug: string, favorite: boolean): boolean {
+  const res = db
+    .prepare('UPDATE user_apps SET favorite = ? WHERE user_id = ? AND app_slug = ?')
+    .run(favorite ? 1 : 0, userId, slug);
+  return res.changes === 1;
 }
 
 export function userCanUseApp(db: Db, userId: number, slug: string): boolean {
@@ -340,7 +357,15 @@ export function getRequest(db: Db, id: number): Request | null {
   return r ? toRequest(r) : null;
 }
 
-export function listRequests(db: Db, filter: { userId?: number; appSlug?: string; limit?: number } = {}): Request[] {
+export interface RequestFilter {
+  userId?: number;
+  appSlug?: string;
+  statuses?: RequestStatus[];
+  limit?: number;
+  offset?: number;
+}
+
+function requestWhere(filter: RequestFilter): { sql: string; args: (string | number)[] } {
   const where: string[] = [];
   const args: (string | number)[] = [];
   if (filter.userId !== undefined) {
@@ -351,8 +376,22 @@ export function listRequests(db: Db, filter: { userId?: number; appSlug?: string
     where.push('r.app_slug = ?');
     args.push(filter.appSlug);
   }
-  const sql = `${REQUEST_SELECT} ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY r.id DESC LIMIT ?`;
-  return (db.prepare(sql).all(...args, filter.limit ?? 50) as RequestRow[]).map(toRequest);
+  if (filter.statuses?.length) {
+    where.push(`r.status IN (${filter.statuses.map(() => '?').join(',')})`);
+    args.push(...filter.statuses);
+  }
+  return { sql: where.length ? `WHERE ${where.join(' AND ')}` : '', args };
+}
+
+export function listRequests(db: Db, filter: RequestFilter = {}): Request[] {
+  const w = requestWhere(filter);
+  const sql = `${REQUEST_SELECT} ${w.sql} ORDER BY r.id DESC LIMIT ? OFFSET ?`;
+  return (db.prepare(sql).all(...w.args, filter.limit ?? 50, filter.offset ?? 0) as RequestRow[]).map(toRequest);
+}
+
+export function countRequests(db: Db, filter: RequestFilter = {}): number {
+  const w = requestWhere(filter);
+  return (db.prepare(`SELECT COUNT(*) AS n FROM requests r ${w.sql}`).get(...w.args) as { n: number }).n;
 }
 
 export interface Decision {

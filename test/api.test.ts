@@ -107,7 +107,7 @@ test('sign-in is unavailable without Google configured', async () => {
   const api = await server.inject({ method: 'POST', url: '/api/login/google', payload: { idToken: 'x', app: 'demo' } });
   assert.equal(api.statusCode, 503);
   const page = await server.inject({ method: 'GET', url: '/' });
-  assert.match(page.body, /no está configurado/);
+  assert.match(page.body, /not configured/);
 });
 
 test('a user cannot see or use an app they were not granted', async () => {
@@ -208,7 +208,7 @@ test('admin: only ADMIN_EMAILS get in; approving wakes the worker; rejecting wor
   const id = listRequests(s.db)[0].id;
 
   const anon = await s.server.inject({ method: 'GET', url: '/admin' });
-  assert.match(anon.body, /Entrar con Google/);
+  assert.match(anon.body, /Sign in with Google/);
   assert.equal((await s.server.inject({ method: 'POST', url: `/admin/requests/${id}/approve` })).statusCode, 403);
 
   const user = await webLogin(s, OSVALDO, '/admin');
@@ -224,7 +224,7 @@ test('admin: only ADMIN_EMAILS get in; approving wakes the worker; rejecting wor
   const adminPortal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie: admin.cookie } });
   assert.match(adminPortal.body, /href="\/admin"/);
   const panel = await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } });
-  assert.match(panel.body, /Por aprobar \(1\)/);
+  assert.match(panel.body, /Pending approval \(1\)/);
   assert.match(panel.body, /Agregar un botón para compartir/);
   await s.server.inject({ method: 'POST', url: `/admin/requests/${id}/approve`, headers: { cookie: admin.cookie } });
   assert.equal(getRequest(s.db, id)?.status, 'approved');
@@ -253,8 +253,8 @@ test('portal: Google button, then the user sees only their apps and can download
   assert.equal(anonPortal.headers.location, '/');
   const landing = await s.server.inject({ method: 'GET', url: '/' });
   assert.equal(landing.statusCode, 200);
-  assert.match(landing.body, /Tu app, con los cambios que tú pides/);
-  assert.match(landing.body, /Cómo funciona/);
+  assert.match(landing.body, /Your app, with the changes you ask for/);
+  assert.match(landing.body, /How it works/);
   assert.match(landing.body, /href="\/auth\/google\/start\?next=%2Fapks"/);
 
   await login(s, OSVALDO, 'demo');
@@ -263,14 +263,14 @@ test('portal: Google button, then the user sees only their apps and can download
   assert.equal(home.statusCode, 303);
   assert.equal(home.headers.location, '/apks');
   let portal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie } });
-  assert.match(portal.body, /Hola, osvaldo/);
+  assert.match(portal.body, /Hi, osvaldo/);
   assert.match(portal.body, /Demo/);
   assert.doesNotMatch(portal.body, /Inglés/);
-  assert.match(portal.body, /Aún no tienes tu versión/);
+  assert.match(portal.body, /You don't have your version yet/);
 
   publishBuild(s, 7, 'abcdef1234', 'APKDATA', 'users/1');
   portal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie } });
-  assert.match(portal.body, /Descargar versión 7/);
+  assert.match(portal.body, /Download version 7/);
   const apk = await s.server.inject({ method: 'GET', url: '/apks/demo/latest.apk', headers: { cookie } });
   assert.equal(apk.statusCode, 200);
   assert.equal(apk.body, 'APKDATA');
@@ -282,7 +282,7 @@ test('portal: Google button, then the user sees only their apps and can download
   const out = await s.server.inject({ method: 'POST', url: '/apks/logout', headers: { cookie } });
   assert.equal(out.statusCode, 303);
   const after = await s.server.inject({ method: 'GET', url: '/', headers: { cookie } });
-  assert.match(after.body, /Entrar con Google/);
+  assert.match(after.body, /Sign in with Google/);
 });
 
 test('download link from the app works once', async () => {
@@ -316,7 +316,7 @@ test('HTML escapes request text', async () => {
   assert.doesNotMatch(panel.body, /<b>negritas<\/b>/);
 });
 
-test('"También a main" is offered and stored only for an admin\'s own request', async () => {
+test('"Also to main" is offered and stored only for an admin\'s own request', async () => {
   const s = await setup();
   await s.server.inject({ method: 'POST', url: '/api/apps/demo/requests', headers: await bearer(s, OSVALDO), payload: { text: VALID } });
   await s.server.inject({ method: 'POST', url: '/api/apps/demo/requests', headers: await bearer(s, ADMIN), payload: { text: VALID } });
@@ -326,7 +326,7 @@ test('"También a main" is offered and stored only for an admin\'s own request',
 
   const admin = await webLogin(s, ADMIN, '/admin');
   const panel = await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } });
-  assert.equal(panel.body.match(/También a main/g)?.length, 1);
+  assert.equal(panel.body.match(/Also to main/g)?.length, 1);
   assert.match(panel.body, new RegExp(`/admin/requests/${mine.id}/approve" class="row">\\s*<label`));
 
   const approve = (id: number) =>
@@ -361,7 +361,7 @@ test('downloads: only your own build; a new user gets none, not main\'s or anoth
   assert.equal(apps[0].latest, null);
   const anaWeb = await webLogin(s, ANA);
   const portal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie: anaWeb.cookie } });
-  assert.match(portal.body, /Aún no tienes tu versión/);
+  assert.match(portal.body, /You don't have your version yet/);
   assert.equal((await s.server.inject({ method: 'GET', url: '/apks/demo/latest.apk', headers: { cookie: anaWeb.cookie } })).statusCode, 404);
 });
 
@@ -386,7 +386,7 @@ test('admin can force a discarded request, then publish or discard it after read
 
   saveReview(s.db, id, '+<script>alert(1)</script>\n', 'Agregué el micrófono.');
   const panel = await get();
-  assert.match(panel, /Por revisar \(1\)/);
+  assert.match(panel, /To review \(1\)/);
   assert.match(panel, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.doesNotMatch(panel, /<script>alert/);
   await s.server.inject({ method: 'POST', url: `/admin/requests/${id}/publish`, headers: { cookie: admin.cookie } });
@@ -400,11 +400,11 @@ test('public pages: privacy, the app page with a base APK anyone can download, a
   upsertApp(s.db, JEEP_OBD2);
   const privacy = await s.server.inject({ method: 'GET', url: '/privacidad' });
   assert.equal(privacy.statusCode, 200);
-  assert.match(privacy.body, /Qué datos guardamos/);
+  assert.match(privacy.body, /What we store/);
   assert.doesNotMatch(privacy.body, /fonts\.googleapis/);
 
   const before = await s.server.inject({ method: 'GET', url: '/apps/jeep-obd2' });
-  assert.match(before.body, /Todavía no hay un APK publicado/);
+  assert.match(before.body, /There is no published APK/);
   assert.equal((await s.server.inject({ method: 'GET', url: '/apps/jeep-obd2/apk' })).statusCode, 404);
 
   fs.mkdirSync(path.join(s.config.apksDir, 'jeep-obd2'), { recursive: true });
@@ -412,7 +412,7 @@ test('public pages: privacy, the app page with a base APK anyone can download, a
   const req = s.db.prepare(`INSERT INTO requests (app_slug, user_id, text, status, created_at) VALUES ('jeep-obd2', NULL, 'x', 'built', 0)`).run();
   addBuild(s.db, { requestId: Number(req.lastInsertRowid), appSlug: 'jeep-obd2', branch: 'main', versionCode: 4, apkFile: 'jeep-obd2-v4-0412bbf.apk', commitSha: '0412bbf' });
   const page = await s.server.inject({ method: 'GET', url: '/apps/jeep-obd2' });
-  assert.match(page.body, /Descargar Jeep OBD2 para Android/);
+  assert.match(page.body, /Download Jeep OBD2 for Android/);
   assert.match(page.body, /ELM327/);
   const apk = await s.server.inject({ method: 'GET', url: '/apps/jeep-obd2/apk' });
   assert.equal(apk.statusCode, 200);
@@ -421,10 +421,10 @@ test('public pages: privacy, the app page with a base APK anyone can download, a
 
   const landing = await s.server.inject({ method: 'GET', url: '/' });
   assert.match(landing.body, /href="\/apps\/jeep-obd2"/);
-  assert.match(landing.body, /No sirve para apps de la Play Store/);
+  assert.match(landing.body, /It does not work with Play Store apps/);
   assert.match(landing.body, /<span>v1\.5\.0<\/span>/);
-  assert.match(landing.body, /Cerebro es un proyecto personal de <a href="https:\/\/github\.com\/iam-oov">Osvaldo Hinojosa<\/a> 🧡/);
-  assert.match(landing.body, /están en <a href="https:\/\/github\.com\/iam-oov">GitHub<\/a>/);
+  assert.match(landing.body, /Cerebro is a personal project by <a href="https:\/\/github\.com\/iam-oov">Osvaldo Hinojosa<\/a> 🧡/);
+  assert.match(landing.body, /are on <a href="https:\/\/github\.com\/iam-oov">GitHub<\/a>/);
   const font = await s.server.inject({ method: 'GET', url: '/fonts/bricolage-grotesque-latin.woff2' });
   assert.equal(font.statusCode, 200);
   assert.equal(font.headers['content-type'], 'font/woff2');
@@ -442,13 +442,13 @@ test('portal form: a refused idea keeps the typed text with the error; a sent on
   assert.match(short.body, />corto<\/textarea>/);
 
   const sent = await s.server.inject({ method: 'POST', url: '/apks/demo/requests', headers: form, payload: `text=${encodeURIComponent(VALID)}` });
-  assert.equal(sent.headers.location, '/apks?enviada=demo');
-  const portal = await s.server.inject({ method: 'GET', url: '/apks?enviada=demo', headers: { cookie } });
-  assert.match(portal.body, /Idea enviada para Demo/);
-  assert.match(portal.body, /<h3 id="ideas-demo">Tus ideas<\/h3>/);
+  assert.equal(sent.headers.location, '/apks?app=demo&sent=demo');
+  const portal = await s.server.inject({ method: 'GET', url: '/apks?app=demo&sent=demo', headers: { cookie } });
+  assert.match(portal.body, /Idea sent for Demo/);
+  assert.match(portal.body, /<h3 id="ideas-demo">Your ideas<\/h3>/);
   assert.match(portal.body, /<details class="idea-toggle"><summary>/);
   assert.match(portal.body, /<body class="portal">/);
-  assert.match(portal.body, /Esperando aprobación/);
+  assert.match(portal.body, /Waiting for approval/);
 });
 
 test('admin: risky requests make rejecting the primary action; forcing takes two steps', async () => {
@@ -457,11 +457,72 @@ test('admin: risky requests make rejecting the primary action; forcing takes two
   const id = listRequests(s.db)[0].id;
   const admin = await webLogin(s, ADMIN, '/admin');
   const panel = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
-  assert.match(panel, new RegExp(`class="secondary">Aprobar #${id}`));
-  assert.match(panel, new RegExp(`class="danger">Rechazar #${id}`));
+  assert.match(panel, new RegExp(`class="secondary"><svg[^]*?</svg>Approve #${id}`));
+  assert.match(panel, new RegExp(`class="danger"><svg[^]*?</svg>Reject #${id}`));
 
   s.db.prepare(`UPDATE requests SET status = 'discarded' WHERE id = ?`).run(id);
   const history = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
-  assert.match(history, /<details class="confirm"><summary>Forzar…<\/summary>/);
-  assert.match(history, new RegExp(`Forzar #${id}</button>`));
+  assert.match(history, /<details class="confirm"><summary><svg[^]*?<\/svg>Force…<\/summary>/);
+  assert.match(history, new RegExp(`Force #${id}</button>`));
+});
+
+test('several apps: favorites first, then most used; the heart toggles and never grants an app', async () => {
+  const s = await setup();
+  const auth = await bearer(s, OSVALDO, 'demo');
+  await login(s, OSVALDO, 'ingles');
+  await s.server.inject({ method: 'POST', url: '/api/apps/ingles/requests', headers: auth, payload: { text: VALID } });
+  const { cookie } = await webLogin(s, OSVALDO);
+  const form = { cookie, 'content-type': 'application/x-www-form-urlencoded' };
+  const chips = async () =>
+    [...(await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie } })).body.matchAll(/<a href="\/apks\?app=([a-z]+)"/g)].map((m) => m[1]);
+
+  assert.deepEqual(await chips(), ['ingles', 'demo']);
+  const fav = await s.server.inject({ method: 'POST', url: '/apks/demo/favorite', headers: form, payload: 'favorite=1&back=/apks' });
+  assert.equal(fav.headers.location, '/apks?app=demo');
+  assert.deepEqual(await chips(), ['demo', 'ingles']);
+  const portal = (await s.server.inject({ method: 'GET', url: '/apks?app=demo', headers: { cookie } })).body;
+  assert.match(portal, /aria-label="Remove Demo from favorites"/);
+  assert.match(portal, /<option value="demo" selected>Demo<\/option><option value="ingles" >Inglés<\/option>/);
+
+  upsertApp(s.db, { ...JEEP_OBD2 });
+  await s.server.inject({ method: 'POST', url: '/apks/jeep-obd2/favorite', headers: form, payload: 'favorite=1&back=/admin' });
+  assert.equal(s.db.prepare(`SELECT COUNT(*) AS n FROM user_apps WHERE app_slug = 'jeep-obd2'`).get()!.n, 0);
+});
+
+test('ideas are paged and filtered so a year of them stays short', async () => {
+  const s = await setup();
+  await login(s, OSVALDO, 'demo');
+  const { cookie } = await webLogin(s, OSVALDO);
+  for (let i = 0; i < 8; i++) {
+    s.db
+      .prepare(`INSERT INTO requests (app_slug, user_id, text, status, branch, created_at) VALUES ('demo', 1, ?, ?, 'users/1', ?)`)
+      .run(`Idea number ${i} for the demo app`, i % 2 ? 'built' : 'discarded', i);
+  }
+  const first = (await s.server.inject({ method: 'GET', url: '/apks?app=demo', headers: { cookie } })).body;
+  assert.equal([...first.matchAll(/Idea number \d/g)].length, 5);
+  assert.match(first, /Showing 5 of 8/);
+  const more = (await s.server.inject({ method: 'GET', url: '/apks?app=demo&shown=15', headers: { cookie } })).body;
+  assert.equal([...more.matchAll(/Idea number \d/g)].length, 8);
+  assert.match(more, /Built on the base version/);
+  const built = (await s.server.inject({ method: 'GET', url: '/apks?app=demo&ideas=built', headers: { cookie } })).body;
+  assert.equal([...built.matchAll(/Idea number \d/g)].length, 4);
+});
+
+test('admin: filter by app, history starts collapsed and is paged; favicon and logo go home', async () => {
+  const s = await setup();
+  await s.server.inject({ method: 'POST', url: '/api/apps/demo/requests', headers: await bearer(s, OSVALDO, 'demo'), payload: { text: VALID } });
+  await s.server.inject({ method: 'POST', url: '/api/apps/ingles/requests', headers: await bearer(s, ANA, 'ingles'), payload: { text: VALID } });
+  const admin = await webLogin(s, ADMIN, '/admin');
+  const all = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
+  assert.match(all, /Pending approval \(2\)/);
+  assert.match(all, /<details class="card fold"  id="history">/);
+  assert.match(all, /<a class="brand" href="\/apks">/);
+  const demo = (await s.server.inject({ method: 'GET', url: '/admin?app=demo', headers: { cookie: admin.cookie } })).body;
+  assert.match(demo, /Pending approval \(1\)/);
+  const hist = (await s.server.inject({ method: 'GET', url: '/admin?hist=failed', headers: { cookie: admin.cookie } })).body;
+  assert.match(hist, /<details class="card fold" open id="history">/);
+
+  const icon = await s.server.inject({ method: 'GET', url: '/favicon.svg' });
+  assert.equal(icon.headers['content-type'], 'image/svg+xml');
+  assert.match(all, /<link rel="icon" href="\/favicon.svg"/);
 });
