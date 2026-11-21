@@ -442,6 +442,49 @@ test('admin can retry a change that reached main but not the author branch; only
   assert.equal(getRequest(s.db, id)!.log.match(/Reintento del paso/g)?.length, 1);
 });
 
+test('admin can sync a user branch with main from its APK card, once at a time; never main itself', async () => {
+  const s = await setup();
+  publishBuild(s, 3, 'aaaaaaa', 'MAIN');
+  publishBuild(s, 4, 'bbbbbbb', 'MINE', 'users/1');
+  const form = (cookie: string) => ({ cookie, 'content-type': 'application/x-www-form-urlencoded' });
+  const syncs = () => listRequests(s.db).filter((r) => r.kind === 'sync');
+
+  const user = await webLogin(s, OSVALDO, '/admin');
+  const denied = await s.server.inject({ method: 'POST', url: '/admin/apps/demo/sync', headers: form(user.cookie), payload: 'branch=users%2F1' });
+  assert.equal(denied.statusCode, 403);
+  assert.equal(syncs().length, 0);
+
+  const admin = await webLogin(s, ADMIN, '/admin');
+  const panel = (await s.server.inject({ method: 'GET', url: '/admin?app=demo', headers: { cookie: admin.cookie } })).body;
+  const forms = [...panel.matchAll(/<form method="post" action="\/admin\/apps\/demo\/sync"><input type="hidden" name="branch" value="([^"]+)">/g)].map((m) => m[1]);
+  assert.deepEqual(forms, ['users/1']);
+  assert.match(panel, /<button class="secondary"><svg[^]*?<\/svg>Sync with main<\/button>/);
+  assert.match(panel, /Brings main's core, build files and dependencies to users\/1 and builds its APK\. The branch keeps its own features\./);
+
+  const post = (branch: string) =>
+    s.server.inject({ method: 'POST', url: '/admin/apps/demo/sync', headers: form(admin.cookie), payload: `branch=${encodeURIComponent(branch)}` });
+  const first = await post('users/1');
+  assert.equal(first.statusCode, 303);
+  assert.equal(first.headers.location, '/admin');
+  await post('users/1');
+  assert.equal(syncs().length, 1);
+  assert.equal(syncs()[0].branch, 'users/1');
+  assert.equal(syncs()[0].status, 'approved');
+  assert.equal(s.wakes(), 1);
+
+  for (const bad of ['main', 'users/x', 'users/1/../main', '']) await post(bad);
+  assert.equal((await s.server.inject({ method: 'POST', url: '/admin/apps/nope/sync', headers: form(admin.cookie), payload: 'branch=users%2F1' })).statusCode, 303);
+  assert.equal(syncs().length, 1);
+  assert.equal(s.wakes(), 1);
+
+  // The owner never sees the sync as one of their ideas, and can still send a new one.
+  const auth = await bearer(s, OSVALDO);
+  const mine = (await s.server.inject({ method: 'GET', url: '/api/apps/demo/requests', headers: auth })).json() as { requests: unknown[] };
+  assert.equal(mine.requests.length, 0);
+  const sent = await s.server.inject({ method: 'POST', url: '/api/apps/demo/requests', headers: auth, payload: { text: VALID } });
+  assert.equal(sent.statusCode, 201);
+});
+
 test('public pages: privacy, the app page with a base APK anyone can download, and self-hosted fonts', async () => {
   const s = await setup();
   upsertApp(s.db, JEEP_OBD2);

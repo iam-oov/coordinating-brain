@@ -27,12 +27,14 @@ export type RequestStatus =
   | 'failed' // could not be built or verified
   | 'discarded'; // the AI or a check refused it
 
+export type RequestKind = 'change' | 'revert' | 'sync';
+
 export interface Request {
   id: number;
   appSlug: string;
   userId: number | null;
   userName: string | null;
-  kind: 'change' | 'revert';
+  kind: RequestKind;
   text: string;
   revertSha: string | null;
   branch: string;
@@ -212,6 +214,10 @@ export function userBranch(uid: number): string {
   return `users/${uid}`;
 }
 
+export function isUserBranch(branch: string): boolean {
+  return /^users\/\d+$/.test(branch);
+}
+
 export function userId(db: Db, name: string): number {
   const r = db.prepare('SELECT id FROM users WHERE name = ?').get(name) as { id: number } | undefined;
   if (!r) throw new Error(`No user named ${name}`);
@@ -262,7 +268,7 @@ type RequestRow = {
   app_slug: string;
   user_id: number | null;
   user_name: string | null;
-  kind: 'change' | 'revert';
+  kind: RequestKind;
   text: string;
   revert_sha: string | null;
   branch: string;
@@ -350,6 +356,24 @@ export function createRevertRequest(db: Db, build: Build, now = Date.now()): Req
       now,
     );
   return getRequest(db, Number(res.lastInsertRowid))!;
+}
+
+export function queueBranchSync(db: Db, appSlug: string, branch: string, now = Date.now()): Request | null {
+  return tx(db, () => {
+    const app = getApp(db, appSlug);
+    if (!app || !isUserBranch(branch)) return null;
+    const open = db
+      .prepare(`SELECT 1 FROM requests WHERE app_slug = ? AND branch = ? AND kind = 'sync' AND status IN (${OPEN.map(() => '?').join(',')})`)
+      .get(appSlug, branch, ...OPEN);
+    if (open) return null;
+    const res = db
+      .prepare(
+        `INSERT INTO requests (app_slug, user_id, kind, text, branch, status, created_at, decided_at)
+         VALUES (?, NULL, 'sync', ?, ?, 'approved', ?, ?)`,
+      )
+      .run(appSlug, `Sync with ${app.branch}`, branch, now, now);
+    return getRequest(db, Number(res.lastInsertRowid));
+  });
 }
 
 export function getRequest(db: Db, id: number): Request | null {

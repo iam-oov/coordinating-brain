@@ -46,6 +46,8 @@ import {
   listBuilds,
   listRequests,
   awaitsBranchCarry,
+  isUserBranch,
+  queueBranchSync,
   retryBranchCarry,
   upsertGoogleUser,
   userBranch,
@@ -434,6 +436,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     const r = getRequest(db, b.requestId);
     if (!r) return `Version ${b.versionCode}`;
     if (r.kind === 'revert') return `Undoes change ${r.revertSha?.slice(0, 7) ?? ''}`.trim();
+    if (r.kind === 'sync') return 'Updated with the base app';
     if (r.userId === null) return 'Base version, built by hand';
     return r.text;
   }
@@ -943,6 +946,18 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     </li>`;
   }
 
+  function syncBar(a: App, branch: string) {
+    return html`<div class="decision">
+      <div class="decision-text">
+        <strong>Sync ${branch} with ${a.branch}?</strong>
+        <span>Brings ${a.branch}'s core, build files and dependencies to ${branch} and builds its APK. The branch keeps its own features.</span>
+      </div>
+      <div class="decision-actions">
+        <form method="post" action="/admin/apps/${a.slug}/sync"><input type="hidden" name="branch" value="${branch}"><button class="secondary">${ICONS.arrowRight}Sync with ${a.branch}</button></form>
+      </div>
+    </div>`;
+  }
+
   function adminBuildsCard(a: App, open: boolean) {
     const byBranch = new Map<string, Build[]>();
     for (const b of listBuilds(db, a.slug, 40)) byBranch.set(b.branch, [...(byBranch.get(b.branch) ?? []), b]);
@@ -951,7 +966,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
       <summary><h2>${a.name} APKs</h2>${ICONS.more}</summary>
       ${branches.length
         ? branches.map(
-            (branch) => html`<h3>${branch}</h3><ul class="list">${byBranch
+            (branch) => html`<h3>${branch}</h3>${isUserBranch(branch) ? syncBar(a, branch) : ''}<ul class="list">${byBranch
               .get(branch)!
               .slice(0, 5)
               .map(
@@ -1015,6 +1030,13 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   app.post<{ Params: { id: string } }>('/admin/requests/:id/discard', async (req, reply) => {
     if (!isAdmin(req)) return reply.code(403).send('Forbidden');
     decideReview(db, Number(req.params.id), false);
+    return reply.redirect('/admin', 303);
+  });
+
+  app.post<{ Params: { slug: string } }>('/admin/apps/:slug/sync', async (req, reply) => {
+    if (!isAdmin(req)) return reply.code(403).send('Forbidden');
+    const branch = String((req.body as { branch?: unknown } | undefined)?.branch ?? '');
+    if (queueBranchSync(db, req.params.slug, branch)) wakeWorker?.();
     return reply.redirect('/admin', 303);
   });
 

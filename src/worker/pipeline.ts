@@ -125,9 +125,19 @@ function pushedSha({ app, req }: Job, branch: string): string | null {
 
 async function implementOn(job: Job, branch: string): Promise<{ summary: string; sha: string }> {
   const { deps, app, req, dir, log } = job;
-  await checkoutTarget(job, branch);
+  const existed = await checkoutTarget(job, branch);
   let summary: string;
-  if (req.kind === 'revert') {
+  if (req.kind === 'sync') {
+    if (!existed) throw new Stop('failed', `La rama ${branch} no existe en el repo.`);
+    if (!(await aheadOfRemote(dir, branch))) {
+      log(`${branch} ya estaba al día con ${app.branch}`);
+      return { summary: `Ya estaba al día con ${app.branch}.`, sha: '' };
+    }
+    summary = 'Tu versión se actualizó con la base de la app.';
+    await bumpVersion(deps.db, app, dir, log);
+    const check = await verify(job);
+    if (!check.ok) throw new Stop('failed', `${branch} con la base de ${app.branch} no pasó la verificación.`);
+  } else if (req.kind === 'revert') {
     summary = await prepareRevert(dir, req, log);
     await bumpVersion(deps.db, app, dir, log);
     const check = await verify(job);
@@ -188,8 +198,7 @@ async function carryToBranch(job: Job, branch: string, mainSha: string): Promise
     }
     await git(dir, 'add', '-A');
     const nothingStaged = (await run('git', ['diff', '--cached', '--quiet'], { cwd: dir })).code === 0;
-    const coreSynced = Number(await git(dir, 'rev-list', '--count', `origin/${branch}..HEAD`)) > 0;
-    if (nothingStaged && !coreSynced) {
+    if (nothingStaged && !(await aheadOfRemote(dir, branch))) {
       log(`${branch} ya tenía el cambio`);
       return;
     }
@@ -269,6 +278,10 @@ export async function syncCore({ app, dir, log }: Pick<Job, 'app' | 'dir' | 'log
   await git(dir, 'commit', '-q', '-m', `chore(core): sync from ${app.branch} ${short}`);
   log(`Núcleo sincronizado desde ${app.branch} (${short})`);
   return true;
+}
+
+async function aheadOfRemote(dir: string, branch: string): Promise<boolean> {
+  return Number(await git(dir, 'rev-list', '--count', `origin/${branch}..HEAD`)) > 0;
 }
 
 async function trackedIn(dir: string, ref: string, p: string): Promise<boolean> {
@@ -412,6 +425,7 @@ function readVersionCode(dir: string): number {
 
 function commitSubject(req: Request): string {
   if (req.kind === 'revert') return `revert: ${req.text}`;
+  if (req.kind === 'sync') return `chore(brain): ${req.text}`;
   const text = req.text.replace(/\s+/g, ' ');
   return `feat(brain): ${text.slice(0, 60)}${text.length > 60 ? '…' : ''}`;
 }

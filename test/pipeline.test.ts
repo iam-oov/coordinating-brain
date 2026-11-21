@@ -17,6 +17,7 @@ import {
   latestBuild,
   latestBuildFor,
   latestBuildOn,
+  queueBranchSync,
   retryBranchCarry,
 } from '../src/store.ts';
 import type { App, Request } from '../src/store.ts';
@@ -453,6 +454,105 @@ test('forced: discarded at review never reaches the repo; a stale diff fails ins
   const r = await run(s, new FakeRunner([]), claimNextApproved(s.db)!);
   assert.equal(r.status, 'failed');
   assert.match(r.reason ?? '', /ya no aplica/);
+});
+
+function syncSetup() {
+  const { config, db } = testSetup();
+  const { remote, app } = makeRemoteApp();
+  registerApp(db, app);
+  createTestUser(db, 'osvaldo', 'osvaldo@example.test', [app.slug]);
+  const queue = () => {
+    assert.ok(queueBranchSync(db, app.slug, 'users/1'));
+    return claimNextApproved(db)!;
+  };
+  return { config, db, remote, app, queue };
+}
+
+async function runSync(s: ReturnType<typeof syncSetup>, req: Request) {
+  const runner = new FakeRunner([]);
+  await processRequest({ db: s.db, config: s.config, runner, sandbox: new DirectSandbox() }, req);
+  assert.equal(runner.calls.length, 0);
+  return getRequest(s.db, req.id)!;
+}
+
+test('sync: the branch gets main\'s core, build files and dependencies, keeps its features and gets a newer APK', async () => {
+  const s = syncSetup();
+  pushToRemote(s.remote, 'users/1', {
+    'lib/mine.dart': '// my feature\n',
+    'pubspec.yaml': 'name: demo\nversion: 1.0.0+5\n\nenvironment:\n  sdk: ^3.0.0\n',
+  });
+  importBuild(s.db, { appSlug: s.app.slug, branch: 'main', versionCode: 7, apkFile: 'demo-v7.apk', commitSha: 'aaaaaaa' });
+  pushToRemote(s.remote, 'main', {
+    'lib/core/auth.dart': 'const signIn = 2;\n',
+    'android/app/src/main/AndroidManifest.xml': '<manifest><uses-permission android:name="android.permission.RECORD_AUDIO" /></manifest>\n',
+    'pubspec.yaml': 'name: demo\nversion: 1.0.0+9\n\nenvironment:\n  sdk: ^3.0.0\ndependencies:\n  speech_to_text: ^7.3.0\n',
+  });
+  const mainBefore = remoteState(s.remote).log;
+  const branchBefore = sh(s.remote, 'git', 'rev-parse', 'users/1');
+
+  const r = await runSync(s, s.queue());
+  assert.equal(r.status, 'built', r.log);
+  assert.equal(r.kind, 'sync');
+  assert.equal(r.reason, 'Tu versión se actualizó con la base de la app.');
+
+  const mine = remoteState(s.remote, 'users/1');
+  assert.equal(mine.read('lib/core/auth.dart'), 'const signIn = 2;\n');
+  assert.match(mine.read('android/app/src/main/AndroidManifest.xml'), /RECORD_AUDIO/);
+  assert.equal(mine.pubspec, 'name: demo\nversion: 1.0.0+8\n\nenvironment:\n  sdk: ^3.0.0\ndependencies:\n  speech_to_text: ^7.3.0\n');
+  assert.equal(mine.read('lib/mine.dart'), '// my feature\n');
+  assert.match(mine.log[0], /^chore\(brain\): Sync with main$/);
+  assert.match(mine.log[1], /^chore\(core\): sync from main [0-9a-f]{7}$/);
+  assert.equal(sh(s.remote, 'git', 'rev-parse', 'users/1~2'), branchBefore);
+
+  assert.deepEqual(remoteState(s.remote).log, mainBefore);
+  assert.equal(r.log.match(/Push a users\/1/g)?.length, 1);
+  assert.doesNotMatch(r.log, /Push a main/);
+  assert.equal(r.mainSha, null);
+  assert.equal(r.branchSha, sh(s.remote, 'git', 'rev-parse', 'users/1'));
+  const b = buildForRequest(s.db, r.id, 'users/1')!;
+  assert.equal(b.versionCode, 8);
+  assert.equal(b.commitSha, r.branchSha);
+  assert.equal(latestBuildFor(s.db, s.app, 1)!.id, b.id);
+});
+
+test('sync: a branch already up to date with main pushes nothing and builds nothing', async () => {
+  const s = syncSetup();
+  pushToRemote(s.remote, 'users/1', { 'lib/mine.dart': '// my feature\n' });
+  pushToRemote(s.remote, 'main', { 'pubspec.yaml': 'name: demo\nversion: 1.0.0+4\n\nenvironment:\n  sdk: ^3.0.0\n' });
+  const before = sh(s.remote, 'git', 'rev-parse', 'users/1');
+
+  const r = await runSync(s, s.queue());
+  assert.equal(r.status, 'built', r.log);
+  assert.equal(r.reason, 'Ya estaba al día con main.');
+  assert.equal(sh(s.remote, 'git', 'rev-parse', 'users/1'), before);
+  assert.doesNotMatch(r.log, /Push a/);
+  assert.equal(r.branchSha, null);
+  assert.equal(buildForRequest(s.db, r.id), null);
+});
+
+test('sync: a branch that does not exist on the remote fails without creating it', async () => {
+  const s = syncSetup();
+  const r = await runSync(s, s.queue());
+  assert.equal(r.status, 'failed');
+  assert.match(r.reason ?? '', /users\/1 no existe/);
+  assert.match(r.log, /Terminado sin publicar: .*users\/1 no existe/);
+  assert.deepEqual(remoteBranches(s.remote), ['main']);
+  assert.equal(buildForRequest(s.db, r.id), null);
+});
+
+test('sync: only one sync per branch can be queued or running at a time', () => {
+  const s = syncSetup();
+  const first = queueBranchSync(s.db, s.app.slug, 'users/1')!;
+  assert.equal(first.kind, 'sync');
+  assert.equal(first.status, 'approved');
+  assert.equal(first.branch, 'users/1');
+  assert.equal(first.userId, null);
+  assert.equal(queueBranchSync(s.db, s.app.slug, 'users/1'), null);
+  claimNextApproved(s.db);
+  assert.equal(queueBranchSync(s.db, s.app.slug, 'users/1'), null);
+  assert.ok(queueBranchSync(s.db, s.app.slug, 'users/2'));
+  s.db.prepare(`UPDATE requests SET status = 'built' WHERE id = ?`).run(first.id);
+  assert.ok(queueBranchSync(s.db, s.app.slug, 'users/1'));
 });
 
 test('verification output drops analyzer info lines so the real errors reach the log and the AI', () => {
