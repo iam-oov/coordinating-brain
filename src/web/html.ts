@@ -366,7 +366,8 @@ const LOG_ENTRY_START = /^(?:\d{4}-\d{2}-\d{2}T|…$)/;
 
 export const FORCED_LOG_LINE =
   'Forzada por el admin: núcleo, dependencias y permisos de Android desbloqueados; pide revisión antes de publicar';
-const RUN_START = new RegExp(`^\\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z ${FORCED_LOG_LINE.split(':')[0]}`);
+export const RETRY_LOG_PREFIX = 'Reintento del paso a';
+const RUN_START = new RegExp(`^\\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z (?:${FORCED_LOG_LINE.split(':')[0]}|${RETRY_LOG_PREFIX} )`);
 
 export function splitRuns(log: string): string[] {
   const runs: string[][] = [[]];
@@ -395,7 +396,7 @@ export interface LogEntry {
 
 const LOG_ERR = /(fallaron|Terminado sin publicar|rechazada|No llegó|no pasó|no compiló|ya no aplica|Error inesperado)/i;
 const LOG_OK = /(APK publicado|Pruebas aprobadas|^Push a )/;
-const LOG_STEP = /^(Intento \d+\/\d+|Forzada por el admin|Aplicando el diff revisado)/;
+const LOG_STEP = /^(Intento \d+\/\d+|Forzada por el admin|Reintento del paso a|Aplicando el diff revisado)/;
 
 export function parseLog(run: string): LogEntry[] {
   const entries: LogEntry[] = [];

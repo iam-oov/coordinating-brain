@@ -57,6 +57,7 @@ import { FAVICON_SVG, ICONS } from './web/icons.ts';
 import {
   API_STATUS_LABEL,
   FORCED_LOG_LINE,
+  RETRY_LOG_PREFIX,
   STATUS_LABEL,
   USER_STATUS_LABEL,
   capitalizeFirst,
@@ -999,7 +1000,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     if (!isAdmin(req)) return reply.code(403).send('Forbidden');
     const r = getRequest(db, Number(req.params.id));
     if (r && retryBranchCarry(db, r.id)) {
-      appendLog(db, r.id, `Reintento del paso a ${r.branch} por el admin`);
+      appendLog(db, r.id, `${RETRY_LOG_PREFIX} ${r.branch} por el admin`);
       wakeWorker?.();
     }
     return reply.redirect('/admin', 303);

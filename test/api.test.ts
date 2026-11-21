@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 import { buildServer } from '../src/server.ts';
 import { addBuild, getRequest, getUser, listRequests, saveReview, upsertApp } from '../src/store.ts';
-import { FORCED_LOG_LINE, capitalizeFirst, fmtWhen, newestFirst, parseLog, richText, splitRuns } from '../src/web/html.ts';
+import { FORCED_LOG_LINE, RETRY_LOG_PREFIX, capitalizeFirst, fmtWhen, newestFirst, parseLog, richText, splitRuns } from '../src/web/html.ts';
 import { JEEP_OBD2 } from '../src/apps.ts';
 import type { App } from '../src/store.ts';
 import type { FakeGoogle, IdTokenClaims } from './helpers.ts';
@@ -622,6 +622,29 @@ test('each force starts a clean run; earlier runs stay folded and Copy takes onl
   const copied = body.match(/data-log="([^"]*)"/)![1];
   assert.match(copied, /Intento 1\/3/);
   assert.doesNotMatch(copied, /Clonando/);
+
+  // An admin retry of the branch carry also starts a clean run.
+  const retryLine = `${RETRY_LOG_PREFIX} users/1 por el admin`;
+  const retried = [
+    log.replace(/\n$/, ''),
+    '2026-11-21T04:40:00.000Z No llegó a users/1: no pasó la verificación',
+    `2026-11-21T05:30:00.000Z ${retryLine}`,
+    '2026-11-21T05:30:02.000Z Clonando (main)',
+    '',
+  ].join('\n');
+  const retriedRuns = splitRuns(retried);
+  assert.equal(retriedRuns.length, 4);
+  assert.match(retriedRuns[2], /No llegó a users\/1/);
+  assert.match(retriedRuns[3], new RegExp(`^2026-11-21T05:30:00.000Z ${retryLine}`));
+  assert.equal(parseLog(retriedRuns[3]).at(-1)?.kind, 'step');
+
+  s.db.prepare(`UPDATE requests SET log = ? WHERE id = ?`).run(retried, id);
+  const after = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
+  assert.match(after, /Run 4 · 2 steps/);
+  assert.match(after, /Earlier runs \(3\)/);
+  const copiedAfter = after.match(/data-log="([^"]*)"/)![1];
+  assert.match(copiedAfter, /Reintento del paso a users\/1 por el admin/);
+  assert.doesNotMatch(copiedAfter, /No llegó/);
 });
 
 test('log entries are parsed into timed steps with errors, successes and attempt separators', () => {
