@@ -329,7 +329,7 @@ test('"Also to main" is offered and stored only for an admin\'s own request', as
   const admin = await webLogin(s, ADMIN, '/admin');
   const panel = await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } });
   assert.equal(panel.body.match(/Also to main/g)?.length, 1);
-  assert.match(panel.body, new RegExp(`/admin/requests/${mine.id}/approve" class="row">\\s*<label`));
+  assert.match(panel.body, new RegExp(`form="approve-${mine.id}" name="alsoMain"`));
 
   const approve = (id: number) =>
     s.server.inject({
@@ -464,8 +464,8 @@ test('admin: risky requests make rejecting the primary action; forcing takes two
   const id = listRequests(s.db)[0].id;
   const admin = await webLogin(s, ADMIN, '/admin');
   const panel = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
-  assert.match(panel, new RegExp(`class="secondary"><svg[^]*?</svg>Approve #${id}`));
-  assert.match(panel, new RegExp(`class="danger"><svg[^]*?</svg>Reject #${id}`));
+  assert.match(panel, new RegExp(`form="approve-${id}" class="secondary"><svg[^]*?</svg>Approve</button>`));
+  assert.match(panel, new RegExp(`class="danger"><svg[^]*?</svg>Reject</button>`));
 
   s.db.prepare(`UPDATE requests SET status = 'discarded' WHERE id = ?`).run(id);
   const history = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;

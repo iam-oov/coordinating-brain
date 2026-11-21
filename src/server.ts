@@ -806,6 +806,13 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return r.userId !== null && isAdminEmail(config, getUser(db, r.userId)?.email);
   }
 
+  function diffStats(patch: string): string {
+    const files = (patch.match(/^diff --git /gm) ?? []).length;
+    const added = (patch.match(/^\+(?!\+\+)/gm) ?? []).length;
+    const removed = (patch.match(/^-(?!--)/gm) ?? []).length;
+    return `${files} ${files === 1 ? 'file' : 'files'}, +${added} −${removed}`;
+  }
+
   function appName(slug: string): string {
     return getApp(db, slug)?.name ?? slug;
   }
@@ -817,18 +824,25 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
       <div><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}, ${fmtDate(r.createdAt)}</span></div>
       <p>${r.text}</p>
       ${r.flags.map((f) => html`<div class="flag" role="note">⚠ ${flagLabel(f)}</div>`)}
-      <div class="decide">
-        <form id="${rejectForm}" method="post" action="/admin/requests/${r.id}/reject"></form>
-        <label class="field" for="reason-${r.id}" style="margin:0">Reason if you reject it (optional)</label>
-        <input id="reason-${r.id}" form="${rejectForm}" type="text" name="reason" placeholder="For example: not part of this app">
-        <div class="row">
-          <form method="post" action="/admin/requests/${r.id}/approve" class="row">
-            ${authorIsAdmin(r)
-              ? html`<label class="row"><input type="checkbox" name="alsoMain" value="on" style="width:auto"> Also to main</label>`
-              : ''}
-            <button class="${risky ? 'secondary' : ''}">${ICONS.check}Approve #${r.id}</button>
-          </form>
-          <button form="${rejectForm}" class="${risky ? 'danger' : 'quiet'}">${ICONS.x}Reject #${r.id}</button>
+      <form id="${rejectForm}" method="post" action="/admin/requests/${r.id}/reject"></form>
+      <form id="approve-${r.id}" method="post" action="/admin/requests/${r.id}/approve"></form>
+      <div class="decision ${risky ? 'risky' : ''}">
+        <div class="decision-field">
+          <label for="reason-${r.id}">Reason, if you reject it</label>
+          <input id="reason-${r.id}" form="${rejectForm}" type="text" name="reason" placeholder="Optional. For example: not part of this app">
+        </div>
+        <div class="decision-text">
+          <strong>Approve #${r.id}?</strong>
+          <span>${risky
+            ? 'This idea has warnings. Read it carefully before approving it.'
+            : `Claude builds it on ${r.branch}. Nothing reaches the app until the tests and the build pass.`}</span>
+        </div>
+        <div class="decision-actions">
+          ${authorIsAdmin(r)
+            ? html`<label class="also-main"><input type="checkbox" form="approve-${r.id}" name="alsoMain" value="on"> Also to main</label>`
+            : ''}
+          <button form="${rejectForm}" class="${risky ? 'danger' : 'quiet'}">${ICONS.x}Reject</button>
+          <button form="approve-${r.id}" class="${risky ? 'secondary' : ''}">${ICONS.check}Approve</button>
         </div>
       </div>
     </li>`;
@@ -837,15 +851,21 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   function adminReviewItem(r: Request) {
     return html`<li>
       <div><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}</span></div>
-      <p class="target">Goes to main and to ${r.branch}.</p>
       <p>${r.text}</p>
       ${r.reason ? html`<p class="muted">${r.reason}</p>` : ''}
-      <details open><summary>Code changes</summary><pre class="diff">${renderDiff(r.reviewPatch ?? '')}</pre></details>
+      <details open class="changes"><summary>Code changes <span class="muted">${diffStats(r.reviewPatch ?? '')}</span></summary>
+        <pre class="diff">${renderDiff(r.reviewPatch ?? '')}</pre></details>
       ${r.log ? logBlock(r.log) : ''}
-      <div class="row">
-        <form method="post" action="/admin/requests/${r.id}/publish"><button>${ICONS.publish}Publish to main and ${r.branch}</button></form>
-        <form method="post" action="/admin/requests/${r.id}/discard"
-          onsubmit="return confirm('Discard #${r.id}? The change will not reach the repo.')"><button class="quiet">${ICONS.x}Discard #${r.id}</button></form>
+      <div class="decision">
+        <div class="decision-text">
+          <strong>Publish #${r.id}?</strong>
+          <span>Builds the APK, then pushes to main and to ${r.branch}. You can undo it later with a revert.</span>
+        </div>
+        <div class="decision-actions">
+          <form method="post" action="/admin/requests/${r.id}/discard"
+            onsubmit="return confirm('Discard #${r.id}? The change will not reach the repo.')"><button class="quiet">${ICONS.x}Discard</button></form>
+          <form method="post" action="/admin/requests/${r.id}/publish"><button>${ICONS.publish}Publish</button></form>
+        </div>
       </div>
     </li>`;
   }
