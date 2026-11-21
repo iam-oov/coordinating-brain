@@ -402,11 +402,23 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     });
   });
 
+  function buildSummary(b: Build): string {
+    const r = getRequest(db, b.requestId);
+    if (!r) return `Version ${b.versionCode}`;
+    if (r.kind === 'revert') return `Undoes change ${r.revertSha?.slice(0, 7) ?? ''}`.trim();
+    if (r.userId === null) return 'Base version, built by hand';
+    return r.text;
+  }
+
   function versionPanel(a: App, b: Build, included: number) {
     return html`<div class="panel panel-version">
       <div class="row" style="justify-content:space-between; align-items:baseline">
         <h3>Your version ${b.versionCode}</h3>
         <span class="when">Published ${fmtDay(b.createdAt)}</span>
+      </div>
+      <div class="whats-new">
+        <p class="label">What's new</p>
+        <p>${buildSummary(b)}</p>
       </div>
       <p class="muted">It has ${included} ${included === 1 ? 'idea of yours' : 'ideas of yours'} on top of the base version. It installs over
         the one you have, without losing your data.</p>
@@ -745,11 +757,19 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   }
 
   function logBlock(log: string, open = false) {
+    const stamps = log.match(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z/gm) ?? [];
+    const last = stamps.at(-1);
+    const lastAt = last ? new Date(last).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
     return html`<details class="log" ${open ? 'open' : ''}>
       <summary class="muted">Log</summary>
-      <button type="button" class="secondary copy" data-log="${log}"
-        onclick="var b = this; navigator.clipboard.writeText(b.dataset.log).then(function () { b.lastChild.textContent = 'Copied'; setTimeout(function () { b.lastChild.textContent = 'Copy'; }, 2000); });">${ICONS.copy}<span>Copy</span></button>
-      <pre>${newestFirst(log)}</pre>
+      <div class="log-panel">
+        <div class="log-bar">
+          <span>${stamps.length} ${stamps.length === 1 ? 'entry' : 'entries'}${lastAt ? `, last at ${lastAt}` : ''}</span>
+          <button type="button" class="secondary copy" data-log="${log}" aria-label="Copy the whole log"
+            onclick="var b = this; navigator.clipboard.writeText(b.dataset.log).then(function () { b.lastChild.textContent = 'Copied'; setTimeout(function () { b.lastChild.textContent = 'Copy'; }, 2000); });">${ICONS.copy}<span>Copy</span></button>
+        </div>
+        <pre>${newestFirst(log)}</pre>
+      </div>
     </details>`;
   }
 
@@ -833,9 +853,12 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
               .get(branch)!
               .slice(0, 5)
               .map(
-                (b, i) => html`<li class="row" style="justify-content:space-between">
-                  <span>v${b.versionCode} <span class="muted">${b.commitSha.slice(0, 7)}, ${fmtDate(b.createdAt)}</span>
-                    ${i === 0 ? html` <span class="status built">current</span>` : ''}</span>
+                (b, i) => html`<li class="build-row">
+                  <div class="build-info">
+                    <p class="build-title">${buildSummary(b)}</p>
+                    <p class="build-meta">v${b.versionCode} · ${b.commitSha.slice(0, 7)} · ${fmtDate(b.createdAt)}
+                      ${i === 0 ? html` <span class="status built">current</span>` : ''}</p>
+                  </div>
                   <form method="post" action="/admin/builds/${b.id}/revert"
                     onsubmit="return confirm('Revert v${b.versionCode} on ${branch}? This makes a new commit and a new APK.')">
                     <button class="secondary">${ICONS.undo}Revert v${b.versionCode}</button></form>

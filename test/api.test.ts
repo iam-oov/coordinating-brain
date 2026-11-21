@@ -272,6 +272,7 @@ test('portal: Google button, then the user sees only their apps and can download
   publishBuild(s, 7, 'abcdef1234', 'APKDATA', 'users/1');
   portal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie } });
   assert.match(portal.body, /Download version 7/);
+  assert.match(portal.body, /What&#39;s new|What's new/);
   const apk = await s.server.inject({ method: 'GET', url: '/apks/demo/latest.apk', headers: { cookie } });
   assert.equal(apk.statusCode, 200);
   assert.equal(apk.body, 'APKDATA');
@@ -386,6 +387,7 @@ test('admin can force a discarded request, then publish or discard it after read
   const withLog = (await s.server.inject({ method: 'GET', url: '/admin?hist=all', headers: { cookie: admin.cookie } })).body;
   assert.match(withLog, /<summary class="muted">Log<\/summary>/);
   assert.match(withLog, /data-log="[^"]*Forzada por el admin/);
+  assert.match(withLog, /<div class="log-bar">\s*<span>\d+ entr(y|ies), last at /);
   assert.match(withLog, /<span>Copy<\/span><\/button>/);
   assert.equal(s.wakes(), 1);
 
