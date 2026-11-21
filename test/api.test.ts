@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 import { buildServer } from '../src/server.ts';
 import { addBuild, getRequest, listRequests, saveReview, upsertApp } from '../src/store.ts';
-import { FORCED_LOG_LINE, newestFirst, splitRuns } from '../src/web/html.ts';
+import { FORCED_LOG_LINE, newestFirst, parseLog, splitRuns } from '../src/web/html.ts';
 import { JEEP_OBD2 } from '../src/apps.ts';
 import type { App } from '../src/store.ts';
 import type { FakeGoogle, IdTokenClaims } from './helpers.ts';
@@ -385,9 +385,9 @@ test('admin can force a discarded request, then publish or discard it after read
   assert.equal(forced.forced, true);
   assert.match(forced.log, /Forzada por el admin/);
   const withLog = (await s.server.inject({ method: 'GET', url: '/admin?hist=all', headers: { cookie: admin.cookie } })).body;
-  assert.match(withLog, /<summary class="muted">Log<\/summary>/);
+  assert.match(withLog, /<summary><svg[^]*?<\/svg>Log<\/summary>/);
   assert.match(withLog, /data-log="[^"]*Forzada por el admin/);
-  assert.match(withLog, /<div class="log-bar">\s*<span>\d+ entr(y|ies), last at /);
+  assert.match(withLog, /<div class="log-bar">\s*<span>\d+ steps?, last at /);
   assert.match(withLog, /<span>Copy<\/span><\/button>/);
   assert.equal(s.wakes(), 1);
 
@@ -577,9 +577,27 @@ test('each force starts a clean run; earlier runs stay folded and Copy takes onl
   s.db.prepare(`UPDATE requests SET status = 'running', log = ? WHERE id = ?`).run(log, id);
   const admin = await webLogin(s, ADMIN, '/admin');
   const body = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
-  assert.match(body, /Run 3 · 2 entries/);
+  assert.match(body, /Run 3 · 2 steps/);
   assert.match(body, /Earlier runs \(2\)/);
   const copied = body.match(/data-log="([^"]*)"/)![1];
   assert.match(copied, /Intento 1\/3/);
   assert.doesNotMatch(copied, /Clonando/);
+});
+
+test('log entries are parsed into timed steps with errors, successes and attempt separators', () => {
+  const entries = parseLog(
+    [
+      '2026-11-21T04:38:31.121Z Clonando git@github.com:iam-oov/jeep-obd2.git (main)',
+      '2026-11-21T04:38:35.898Z Pruebas: flutter analyze --no-pub',
+      '2026-11-21T04:38:50.000Z Pruebas fallaron (código 1)',
+      '  error • undefined name',
+      '36 issues found.',
+      '2026-11-21T04:38:51.000Z Intento 2/3: Claude implementa la solicitud',
+      '2026-11-21T04:45:00.000Z APK publicado: users/1/jeep-obd2-v8.apk',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(entries.map((e) => e.kind), ['ok', 'step', 'err', '', '']);
+  assert.equal(entries[2].detail, '  error • undefined name\n36 issues found.');
+  assert.equal(entries[4].text, 'Clonando git@github.com:iam-oov/jeep-obd2.git (main)');
 });

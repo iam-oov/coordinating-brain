@@ -91,21 +91,37 @@ button.quiet { background:transparent; color:var(--bad); border-color:var(--bad)
 .version { font-size:.8rem; font-weight:600; color:var(--node-text); white-space:nowrap; }
 .flag { color:var(--bad); font-size:.88rem; }
 .error { color:var(--bad); }
-ul.list { list-style:none; padding:0; margin:0; } ul.list li { padding:12px 0; border-top:1px solid var(--line); }
-ul.list li:first-child { border-top:0; }
+ul.list { list-style:none; padding:0; margin:0; } ul.list > li { padding:12px 0; border-top:1px solid var(--line); }
+ul.list > li:first-child { border-top:0; }
 pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:.75rem; max-height:240px; overflow:auto; background:var(--bg);
   padding:10px; border-radius:10px; border:1px solid var(--line); }
 pre.diff { max-height:480px; }
-details.log[open] > summary { margin-bottom:8px; }
-.log-panel { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--bg); }
+details.log, details.earlier { margin-top:10px; }
+details.log > summary, details.earlier > summary { cursor:pointer; list-style:none; display:inline-flex; align-items:center; gap:6px;
+  min-height:36px; font-size:.9rem; font-weight:600; color:var(--muted); }
+details.log > summary::-webkit-details-marker, details.earlier > summary::-webkit-details-marker { display:none; }
+details.log > summary .icon, details.earlier > summary .icon { width:16px; height:16px; transition:transform .2s ease-out; }
+details.log[open] > summary .icon, details.earlier[open] > summary .icon { transform:rotate(180deg); }
+details.log[open] > summary { margin-bottom:6px; color:var(--fg); }
+@media (prefers-reduced-motion: reduce) { details.log > summary .icon, details.earlier > summary .icon { transition:none; } }
+.log-panel { border:1px solid var(--line); border-radius:12px; overflow:hidden; background:var(--bg); }
+.log-list { list-style:none; margin:0; padding:6px 0; max-height:380px; overflow:auto; font-size:.86rem; line-height:1.45; }
+.log-list li { display:grid; grid-template-columns:6.6rem minmax(0, 1fr); gap:0 12px; padding:5px 14px; }
+.log-list li.step { margin-top:6px; padding-top:10px; border-top:1px solid var(--line); }
+.log-list li.step:first-child { margin-top:0; border-top:0; }
+.log-list time { color:var(--muted); font-size:.78rem; font-variant-numeric:tabular-nums; padding-top:2px; white-space:nowrap; }
+.log-msg { min-width:0; overflow-wrap:anywhere; }
+.log-msg code { font-size:.8rem; background:var(--card); border:1px solid var(--line); border-radius:5px; padding:0 5px; }
+.log-list li.step .log-msg { font-weight:700; }
+.log-list li.err .log-msg { color:var(--bad); font-weight:600; }
+.log-list li.ok .log-msg { color:var(--ok); font-weight:600; }
+.log-detail { margin:6px 0 2px; max-height:220px; font-size:.74rem; background:var(--card); }
+.log-list li.err .log-detail, .log-list li.ok .log-detail { color:var(--fg); font-weight:400; }
 .log-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:6px 6px 6px 12px;
   background:var(--card); border-bottom:1px solid var(--line); font-size:.82rem; color:var(--muted); }
 .log-bar button.copy { min-height:32px; padding:0 12px; font-size:.85rem; gap:6px; }
 .log-bar button.copy .icon { width:15px; height:15px; }
-.log-panel pre { margin:0; border:0; border-radius:0; background:transparent; }
-details.earlier { margin-top:10px; }
-details.earlier > summary { cursor:pointer; font-size:.88rem; }
-.run-label { margin:12px 0 4px; font-size:.82rem; font-weight:600; color:var(--muted); }
+.run-label { margin:12px 0 6px; font-size:.82rem; font-weight:600; color:var(--muted); }
 .build-row { display:flex; align-items:center; justify-content:space-between; gap:12px 16px; flex-wrap:wrap; }
 .build-info { flex:1 1 260px; min-width:0; }
 .build-title { margin:0; font-weight:600; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
@@ -351,6 +367,33 @@ export function newestFirst(log: string): string {
     else entries[entries.length - 1] += `\n${line}`;
   }
   return entries.reverse().join('\n');
+}
+
+export interface LogEntry {
+  at: string;
+  text: string;
+  detail: string;
+  kind: 'err' | 'ok' | 'step' | '';
+}
+
+const LOG_ERR = /(fallaron|Terminado sin publicar|rechazada|No llegó|no pasó|no compiló|ya no aplica|Error inesperado)/i;
+const LOG_OK = /(APK publicado|Pruebas aprobadas|^Push a )/;
+const LOG_STEP = /^(Intento \d+\/\d+|Forzada por el admin|Aplicando el diff revisado)/;
+
+export function parseLog(run: string): LogEntry[] {
+  const entries: LogEntry[] = [];
+  for (const line of run.replace(/\n+$/, '').split('\n')) {
+    const m = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:.]+Z) (.*)$/);
+    if (m) {
+      const text = m[2];
+      const kind = LOG_ERR.test(text) ? 'err' : LOG_OK.test(text) ? 'ok' : LOG_STEP.test(text) ? 'step' : '';
+      entries.push({ at: m[1], text, detail: '', kind });
+    } else if (entries.length) {
+      const e = entries[entries.length - 1];
+      e.detail = e.detail ? `${e.detail}\n${line}` : line;
+    }
+  }
+  return entries.reverse();
 }
 
 export function renderDiff(patch: string): Raw {

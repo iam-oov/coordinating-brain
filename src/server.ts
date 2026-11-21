@@ -60,8 +60,8 @@ import {
   fmtDate,
   fmtDay,
   html,
-  newestFirst,
   page,
+  parseLog,
   raw,
   renderDiff,
   splitRuns,
@@ -775,27 +775,45 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return stamp ? new Date(stamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
   }
 
+  function logTime(at: string): string {
+    return new Date(at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  }
+
+  function logMessage(text: string) {
+    const step = text.match(/^(Preparación|Pruebas|Compilación): (.+)$/);
+    return step ? html`${step[1]} <code>${step[2]}</code>` : text;
+  }
+
+  function logList(run: string) {
+    return html`<ol class="log-list">${parseLog(run).map(
+      (e) => html`<li class="${e.kind}">
+        <time datetime="${e.at}">${logTime(e.at)}</time>
+        <div class="log-msg">${logMessage(e.text)}${e.detail ? html`<pre class="log-detail">${e.detail}</pre>` : ''}</div>
+      </li>`,
+    )}</ol>`;
+  }
+
   function logBlock(log: string, open = false) {
     const runs = splitRuns(log);
     const current = runs[runs.length - 1];
     const earlier = runs.slice(0, -1).reverse();
-    const entries = (current.match(/^\d{4}-\d{2}-\d{2}T/gm) ?? []).length;
+    const entries = parseLog(current).length;
     const lastAt = runTime(current, 'last');
     return html`<details class="log" ${open ? 'open' : ''}>
-      <summary class="muted">Log</summary>
+      <summary>${ICONS.more}Log</summary>
       <div class="log-panel">
         <div class="log-bar">
-          <span>${runs.length > 1 ? `Run ${runs.length} · ` : ''}${entries} ${entries === 1 ? 'entry' : 'entries'}${lastAt ? `, last at ${lastAt}` : ''}</span>
+          <span>${runs.length > 1 ? `Run ${runs.length} · ` : ''}${entries} ${entries === 1 ? 'step' : 'steps'}${lastAt ? `, last at ${lastAt}` : ''}</span>
           <button type="button" class="secondary copy" data-log="${current}" aria-label="Copy this run's log"
             onclick="var b = this; navigator.clipboard.writeText(b.dataset.log).then(function () { b.lastChild.textContent = 'Copied'; setTimeout(function () { b.lastChild.textContent = 'Copy'; }, 2000); });">${ICONS.copy}<span>Copy</span></button>
         </div>
-        <pre>${newestFirst(current)}</pre>
+        ${logList(current)}
       </div>
       ${earlier.length
-        ? html`<details class="earlier"><summary class="muted">Earlier runs (${earlier.length})</summary>
+        ? html`<details class="earlier"><summary>${ICONS.more}Earlier runs (${earlier.length})</summary>
             ${earlier.map(
               (run, i) => html`<p class="run-label">Run ${runs.length - 1 - i}, started at ${runTime(run, 'first')}</p>
-                <div class="log-panel"><pre>${newestFirst(run)}</pre></div>`,
+                <div class="log-panel">${logList(run)}</div>`,
             )}
           </details>`
         : ''}
