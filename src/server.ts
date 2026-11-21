@@ -48,6 +48,7 @@ const SESSION_COOKIE = 'cb_session';
 const OAUTH_COOKIE = 'cb_oauth';
 const OAUTH_COOKIE_PATH = '/auth/google';
 const LOGIN_NEXT = ['/apks', '/admin'];
+const ADMIN_REFRESH_SEC = 10;
 
 export interface ServerDeps {
   config: Config;
@@ -381,13 +382,14 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
           ${pending.length ? html`<ul class="list">${pending.map(adminPendingItem)}</ul>` : html`<p class="muted">Nada pendiente.</p>`}
         </section>
         <section class="card"><h2>En cola / implementando (${queue.length})</h2>
-          ${queue.length ? html`<ul class="list">${queue.map(adminHistoryItem)}</ul>` : html`<p class="muted">Vacía.</p>`}
+          ${queue.length ? html`<ul class="list">${queue.map((r) => adminHistoryItem(r, true))}</ul>` : html`<p class="muted">Vacía.</p>`}
         </section>
         ${listApps(db).map(adminBuildsCard)}
         <section class="card"><h2>Historial</h2>
-          ${done.length ? html`<ul class="list">${done.map(adminHistoryItem)}</ul>` : html`<p class="muted">Sin historial.</p>`}
+          ${done.length ? html`<ul class="list">${done.map((r) => adminHistoryItem(r))}</ul>` : html`<p class="muted">Sin historial.</p>`}
         </section>
       `,
+      { refreshSec: queue.length ? ADMIN_REFRESH_SEC : undefined },
     );
   });
 
@@ -415,7 +417,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     </li>`;
   }
 
-  function adminHistoryItem(r: Request) {
+  function adminHistoryItem(r: Request, openLog = false) {
     return html`<li>
       <div class="row" style="justify-content:space-between">
         <span><strong>#${r.id}</strong> ${r.appSlug} · ${r.userName ?? 'sistema'} · <span class="muted">${r.branch}${r.alsoMain ? ' + main' : ''}</span></span>
@@ -423,7 +425,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
       </div>
       <div>${r.text}</div>
       ${r.reason ? html`<div class="muted">${r.reason}</div>` : ''}
-      ${r.log ? html`<details><summary class="muted">Log</summary><pre>${r.log}</pre></details>` : ''}
+      ${r.log ? html`<details ${openLog ? 'open' : ''}><summary class="muted">Log</summary><pre>${r.log}</pre></details>` : ''}
     </li>`;
   }
 

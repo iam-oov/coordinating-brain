@@ -69,11 +69,12 @@ ul.list li:first-child { border-top:0; }
 pre { white-space:pre-wrap; font-size:.75rem; max-height:240px; overflow:auto; background:var(--bg); padding:8px; border-radius:8px; }
 `;
 
-export function page(title: string, body: Raw): string {
+export function page(title: string, body: Raw, opts: { refreshSec?: number } = {}): string {
+  const refresh = opts.refreshSec ? `\n<meta http-equiv="refresh" content="${opts.refreshSec}">` : '';
   return `<!doctype html>
 <html lang="es">
 <head>
-<meta charset="utf-8">
+<meta charset="utf-8">${refresh}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>${esc(title)}</title>

@@ -224,6 +224,9 @@ test('admin: only ADMIN_EMAILS get in; approving wakes the worker; rejecting wor
   await s.server.inject({ method: 'POST', url: `/admin/requests/${id}/approve`, headers: { cookie: admin.cookie } });
   assert.equal(getRequest(s.db, id)?.status, 'approved');
   assert.equal(s.wakes(), 1);
+  const queued = await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } });
+  assert.match(queued.body, /<meta http-equiv="refresh" content="10">/);
+  assert.doesNotMatch(panel.body, /http-equiv="refresh"/);
 
   s.config.adminEmails = [];
   const revoked = await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } });
