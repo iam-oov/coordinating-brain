@@ -1,7 +1,12 @@
+import { readFileSync } from 'node:fs';
+
 import type { AppPage } from './catalog.ts';
 import { APP_PAGES } from './catalog.ts';
 import type { Raw } from './html.ts';
 import { html, raw } from './html.ts';
+
+const GITHUB_URL = 'https://github.com/iam-oov';
+const APP_VERSION = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 
 export const BRAND_MARK = raw(`<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-linecap="round">
   <path d="M7 3v18" stroke="currentColor" stroke-width="2.4"/>
@@ -51,7 +56,8 @@ export function topbar(signInEnabled: boolean): Raw {
 
 export function footer(): Raw {
   return html`<footer class="footer">
-    <span>Cerebro es un proyecto personal de valdoh.com.</span>
+    <span>v${APP_VERSION}</span>
+    <span>Cerebro es un proyecto personal de <a href="${GITHUB_URL}">Osvaldo Hinojosa</a> 🧡</span>
     <a href="/privacidad">Privacidad</a>
   </footer>`;
 }
@@ -106,8 +112,8 @@ export function landingPage(signInEnabled: boolean): Raw {
     <section class="section">
       <h2>Lo que no cambia</h2>
       <div class="promises">
-        <p><strong>El núcleo está protegido</strong>El inicio de sesión y el botón de sugerencias no se pueden quitar con una solicitud.</p>
-        <p><strong>Todo es público</strong>Tus solicitudes y el código de tu versión están en GitHub. No escribas datos personales.</p>
+        <p><strong>El núcleo está protegido</strong>Las partes esenciales de cada app quedan fuera del alcance de cualquier solicitud.</p>
+        <p><strong>Todo es público</strong>Tus solicitudes y el código de tu versión están en <a href="${GITHUB_URL}">GitHub</a>. No escribas datos personales.</p>
         <p><strong>El código nuevo corre aislado</strong>Las pruebas corren sin internet y sin acceso a llaves ni contraseñas.</p>
       </div>
     </section>

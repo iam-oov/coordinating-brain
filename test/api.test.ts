@@ -422,6 +422,9 @@ test('public pages: privacy, the app page with a base APK anyone can download, a
   const landing = await s.server.inject({ method: 'GET', url: '/' });
   assert.match(landing.body, /href="\/apps\/jeep-obd2"/);
   assert.match(landing.body, /No sirve para apps de la Play Store/);
+  assert.match(landing.body, /<span>v1\.5\.0<\/span>/);
+  assert.match(landing.body, /Cerebro es un proyecto personal de <a href="https:\/\/github\.com\/iam-oov">Osvaldo Hinojosa<\/a> 🧡/);
+  assert.match(landing.body, /están en <a href="https:\/\/github\.com\/iam-oov">GitHub<\/a>/);
   const font = await s.server.inject({ method: 'GET', url: '/fonts/bricolage-grotesque-latin.woff2' });
   assert.equal(font.statusCode, 200);
   assert.equal(font.headers['content-type'], 'font/woff2');

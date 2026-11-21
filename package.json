@@ -1,6 +1,6 @@
 {
   "name": "coordinating-brain",
-  "version": "0.1.0",
+  "version": "1.5.0",
   "private": true,
   "description": "Backend that receives improvement requests for apps, implements approved ones with Claude Code, and publishes the built APK.",
   "type": "module",
