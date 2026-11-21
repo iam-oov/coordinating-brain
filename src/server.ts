@@ -744,6 +744,15 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     </li>`;
   }
 
+  function logBlock(log: string, open = false) {
+    return html`<details class="log" ${open ? 'open' : ''}>
+      <summary class="muted">Log</summary>
+      <button type="button" class="secondary copy" data-log="${log}"
+        onclick="var b = this; navigator.clipboard.writeText(b.dataset.log).then(function () { b.lastChild.textContent = 'Copied'; setTimeout(function () { b.lastChild.textContent = 'Copy'; }, 2000); });">${ICONS.copy}<span>Copy</span></button>
+      <pre>${newestFirst(log)}</pre>
+    </details>`;
+  }
+
   function authorIsAdmin(r: Request): boolean {
     return r.userId !== null && isAdminEmail(config, getUser(db, r.userId)?.email);
   }
@@ -783,7 +792,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
       <p>${r.text}</p>
       ${r.reason ? html`<p class="muted">${r.reason}</p>` : ''}
       <details open><summary>Code changes</summary><pre class="diff">${renderDiff(r.reviewPatch ?? '')}</pre></details>
-      ${r.log ? html`<details><summary class="muted">Log, newest first</summary><pre>${newestFirst(r.log)}</pre></details>` : ''}
+      ${r.log ? logBlock(r.log) : ''}
       <div class="row">
         <form method="post" action="/admin/requests/${r.id}/publish"><button>${ICONS.publish}Publish to main and ${r.branch}</button></form>
         <form method="post" action="/admin/requests/${r.id}/discard"
@@ -796,12 +805,12 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     const forceable = r.kind === 'change' && (r.status === 'failed' || r.status === 'discarded');
     return html`<li>
       <div class="row" style="justify-content:space-between">
-        <span><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}, ${r.branch}${r.alsoMain ? ' and main' : ''}</span></span>
+        <span><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}${r.alsoMain ? ', also to main' : ''}</span></span>
         <span class="status ${r.status}">${STATUS_LABEL[r.status]}</span>
       </div>
       <div>${r.text}</div>
       ${r.reason ? html`<div class="muted">${r.reason}</div>` : ''}
-      ${r.log ? html`<details ${openLog ? 'open' : ''}><summary class="muted">Log, newest first</summary><pre>${newestFirst(r.log)}</pre></details>` : ''}
+      ${r.log ? logBlock(r.log, openLog) : ''}
       ${forceable
         ? html`<details class="confirm"><summary>${ICONS.bolt}Force…</summary>
             <p>Builds #${r.id} again with the core, dependencies and Android permissions unlocked. It goes to main, for

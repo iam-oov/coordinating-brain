@@ -383,6 +383,10 @@ test('admin can force a discarded request, then publish or discard it after read
   assert.equal(forced.status, 'approved');
   assert.equal(forced.forced, true);
   assert.match(forced.log, /Forzada por el admin/);
+  const withLog = (await s.server.inject({ method: 'GET', url: '/admin?hist=all', headers: { cookie: admin.cookie } })).body;
+  assert.match(withLog, /<summary class="muted">Log<\/summary>/);
+  assert.match(withLog, /data-log="[^"]*Forzada por el admin/);
+  assert.match(withLog, /<span>Copy<\/span><\/button>/);
   assert.equal(s.wakes(), 1);
 
   saveReview(s.db, id, '+<script>alert(1)</script>\n', 'Agregué el micrófono.');

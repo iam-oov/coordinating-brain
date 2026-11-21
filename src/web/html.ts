@@ -96,6 +96,7 @@ ul.list li:first-child { border-top:0; }
 pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:.75rem; max-height:240px; overflow:auto; background:var(--bg);
   padding:10px; border-radius:10px; border:1px solid var(--line); }
 pre.diff { max-height:480px; }
+details.log > button.copy { min-height:36px; padding:0 12px; font-size:.88rem; margin:8px 0; }
 pre.diff .add { color:var(--add); } pre.diff .del { color:var(--del); } pre.diff .meta { color:var(--muted); font-weight:600; }
 .notice { background:var(--card); border:1px solid var(--ok); color:var(--fg); border-radius:12px; padding:12px 14px; margin:12px 0; }
 .includes { margin:10px 0 4px; padding-left:20px; } .includes li { margin:2px 0; }
