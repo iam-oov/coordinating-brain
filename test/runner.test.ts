@@ -61,6 +61,18 @@ test('the request is fenced as data and the rules forbid shell, network and prot
   assert.match(retry, /<salida>\nerror: x\n<\/salida>/);
 });
 
+test('the rules forbid code comments outside tests and ask for a plain user-facing reply', () => {
+  for (const sys of [systemPrompt(app), systemPrompt(app, true)]) {
+    assert.doesNotMatch(sys, /Code comments in English/);
+    assert.match(sys, /Do not write code comments/);
+    assert.match(sys, /only in test files/);
+    assert.match(sys, /shown to the user who asked for the change/);
+    assert.match(sys, /one or two short sentences in Spanish/);
+    assert.match(sys, /what the user will see in the app/);
+    assert.match(sys, /do not mention tests, the analyzer, the build, the pipeline, file names or packages/);
+  }
+});
+
 test('Claude Code runs with file tools only, --bare, and without the brain secrets', async () => {
   const { bin, record } = fakeClaude('Cambié el color a verde.');
   process.env.ADMIN_PASSWORD = 'should-not-leak-to-claude';
