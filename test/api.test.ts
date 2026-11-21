@@ -403,6 +403,45 @@ test('admin can force a discarded request, then publish or discard it after read
   assert.equal(s.wakes(), 2);
 });
 
+test('admin can retry a change that reached main but not the author branch; only qualifying rows get the button', async () => {
+  const s = await setup();
+  const auth = await bearer(s, OSVALDO);
+  await s.server.inject({ method: 'POST', url: '/api/apps/demo/requests', headers: auth, payload: { text: VALID } });
+  const id = listRequests(s.db)[0].id;
+  s.db
+    .prepare(`UPDATE requests SET status = 'built', forced = 1, review_ok = 1, main_sha = 'ceafe80', reason = 'Agregué el micrófono.' WHERE id = ?`)
+    .run(id);
+  await s.server.inject({ method: 'POST', url: '/api/apps/demo/requests', headers: auth, payload: { text: `${VALID} y otro más` } });
+  const done = listRequests(s.db)[0].id;
+  s.db.prepare(`UPDATE requests SET status = 'built', forced = 1, review_ok = 1, main_sha = 'ceafe80', branch_sha = 'b1' WHERE id = ?`).run(done);
+  const branch = getRequest(s.db, id)!.branch;
+
+  const user = await webLogin(s, OSVALDO, '/admin');
+  assert.equal((await s.server.inject({ method: 'POST', url: `/admin/requests/${id}/retry-branch`, headers: { cookie: user.cookie } })).statusCode, 403);
+  assert.equal(getRequest(s.db, id)!.status, 'built');
+
+  const admin = await webLogin(s, ADMIN, '/admin');
+  const panel = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
+  assert.match(panel, new RegExp(`<form method="post" action="/admin/requests/${id}/retry-branch"><button class="secondary"><svg[^]*?</svg>Retry on ${branch}</button></form>`));
+  assert.match(panel, new RegExp(`<div class="decision">\\s*<div class="decision-text">\\s*<strong>Reached main but not ${branch}\\.</strong>`));
+  assert.doesNotMatch(panel, new RegExp(`/admin/requests/${done}/retry-branch`));
+
+  const retried = await s.server.inject({ method: 'POST', url: `/admin/requests/${id}/retry-branch`, headers: { cookie: admin.cookie } });
+  assert.equal(retried.statusCode, 303);
+  assert.equal(retried.headers.location, '/admin');
+  const r = getRequest(s.db, id)!;
+  assert.equal(r.status, 'approved');
+  assert.equal(r.mainSha, 'ceafe80');
+  assert.equal(r.reason, 'Agregué el micrófono.');
+  assert.match(r.log, new RegExp(`Reintento del paso a ${branch} por el admin`));
+  assert.equal(s.wakes(), 1);
+
+  // A second click while it is queued changes nothing.
+  await s.server.inject({ method: 'POST', url: `/admin/requests/${id}/retry-branch`, headers: { cookie: admin.cookie } });
+  assert.equal(s.wakes(), 1);
+  assert.equal(getRequest(s.db, id)!.log.match(/Reintento del paso/g)?.length, 1);
+});
+
 test('public pages: privacy, the app page with a base APK anyone can download, and self-hosted fonts', async () => {
   const s = await setup();
   upsertApp(s.db, JEEP_OBD2);

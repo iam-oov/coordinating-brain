@@ -45,6 +45,8 @@ import {
   listApps,
   listBuilds,
   listRequests,
+  awaitsBranchCarry,
+  retryBranchCarry,
   upsertGoogleUser,
   userBranch,
   userCanUseApp,
@@ -902,6 +904,11 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     </li>`;
   }
 
+  function retryableCarry(r: Request): boolean {
+    const a = getApp(db, r.appSlug);
+    return !!a && awaitsBranchCarry(r, a.branch);
+  }
+
   function adminHistoryItem(r: Request, openLog = false) {
     const forceable = r.kind === 'change' && (r.status === 'failed' || r.status === 'discarded');
     const at = r.finishedAt ?? r.decidedAt ?? r.createdAt;
@@ -920,6 +927,17 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
               everyone. You will review the changes before publishing.</p>
             <form method="post" action="/admin/requests/${r.id}/force"><button class="danger">${ICONS.bolt}Force #${r.id}</button></form>
           </details>`
+        : ''}
+      ${retryableCarry(r)
+        ? html`<div class="decision">
+            <div class="decision-text">
+              <strong>Reached main but not ${r.branch}.</strong>
+              <span>Applies the change already on main to ${r.branch} and builds its APK. Claude does not run again.</span>
+            </div>
+            <div class="decision-actions">
+              <form method="post" action="/admin/requests/${r.id}/retry-branch"><button class="secondary">${ICONS.publish}Retry on ${r.branch}</button></form>
+            </div>
+          </div>`
         : ''}
     </li>`;
   }
@@ -972,6 +990,16 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     const id = Number(req.params.id);
     if (forceRequest(db, id)) {
       appendLog(db, id, FORCED_LOG_LINE);
+      wakeWorker?.();
+    }
+    return reply.redirect('/admin', 303);
+  });
+
+  app.post<{ Params: { id: string } }>('/admin/requests/:id/retry-branch', async (req, reply) => {
+    if (!isAdmin(req)) return reply.code(403).send('Forbidden');
+    const r = getRequest(db, Number(req.params.id));
+    if (r && retryBranchCarry(db, r.id)) {
+      appendLog(db, r.id, `Reintento del paso a ${r.branch} por el admin`);
       wakeWorker?.();
     }
     return reply.redirect('/admin', 303);

@@ -76,7 +76,7 @@ export async function processRequest(deps: PipelineDeps, req: Request): Promise<
       return;
     }
 
-    let summary = 'Cambio implementado.';
+    let summary = req.reason || 'Cambio implementado.';
     let firstSha = '';
     for (const [i, branch] of targets.entries()) {
       const recorded = pushedSha(job, branch);

@@ -5,6 +5,7 @@ import { test } from 'node:test';
 
 import type { Db } from '../src/db.ts';
 import {
+  buildForRequest,
   claimNextApproved,
   createRequest,
   createRevertRequest,
@@ -16,10 +17,12 @@ import {
   latestBuild,
   latestBuildFor,
   latestBuildOn,
+  retryBranchCarry,
 } from '../src/store.ts';
 import type { App, Request } from '../src/store.ts';
 import { processRequest, withoutInfoLines } from '../src/worker/pipeline.ts';
 import { DirectSandbox } from '../src/worker/sandbox.ts';
+import type { TestSandbox } from '../src/worker/sandbox.ts';
 import type { AgentRunner, ImplementInput, ImplementOutput } from '../src/worker/runner.ts';
 import { ADMIN_EMAIL, createTestUser, makeRemoteApp, pushToRemote, registerApp, remoteBranches, remoteState, sh, testSetup } from './helpers.ts';
 
@@ -62,9 +65,23 @@ const writes = (files: Record<string, string>, summary = 'ok') => ({ cwd }: Impl
   return { summary };
 };
 
-async function run(s: ReturnType<typeof setup>, runner: AgentRunner, req: Request = s.req) {
-  await processRequest({ db: s.db, config: s.config, runner, sandbox: new DirectSandbox() }, req);
+async function run(s: ReturnType<typeof setup>, runner: AgentRunner, req: Request = s.req, sandbox: TestSandbox = new DirectSandbox()) {
+  await processRequest({ db: s.db, config: s.config, runner, sandbox }, req);
   return getRequest(s.db, req.id)!;
+}
+
+/** Fails the sandboxed tests whenever [branch] is checked out, like the stale build-hook artifacts did. */
+class FailingOnBranch implements TestSandbox {
+  readonly branch: string;
+  constructor(branch: string) {
+    this.branch = branch;
+  }
+  async run(cwd: string, command: string, timeoutMs: number) {
+    if (sh(cwd, 'git', 'rev-parse', '--abbrev-ref', 'HEAD') === this.branch) {
+      return { code: 1, output: 'stale build hooks', timedOut: false };
+    }
+    return new DirectSandbox().run(cwd, command, timeoutMs);
+  }
 }
 
 test('happy path: lands on the author branch, main untouched, APK published under the branch', async () => {
@@ -359,6 +376,67 @@ test('forced: after the review it publishes the reviewed diff to main and the au
   assert.ok(mine.files.includes('lib/mine.dart'));
   assert.equal(latestBuildOn(s.db, s.app.slug, 'main')!.versionCode, 2);
   assert.equal(latestBuildOn(s.db, s.app.slug, 'users/1')!.versionCode, 3);
+});
+
+test('forced: a change on main that never reached the author branch is retried there without the AI or a new main build', async () => {
+  const s = setup('Agregar un botón de micrófono en el buzón');
+  pushToRemote(s.remote, 'users/1', { 'lib/mine.dart': '// mine\n' });
+  await forcedToReview(s);
+  assert.ok(decideReview(s.db, s.req.id, true));
+  const first = await run(s, new FakeRunner([]), claimNextApproved(s.db)!, new FailingOnBranch('users/1'));
+  assert.equal(first.status, 'built', first.log);
+  assert.match(first.log, /No llegó a users\/1/);
+  assert.equal(first.branchSha, null);
+  assert.equal(first.mainSha, sh(s.remote, 'git', 'rev-parse', 'main'));
+  assert.equal(first.reason, 'Agregué el micrófono al buzón.');
+  assert.ok(!remoteState(s.remote, 'users/1').files.includes('lib/core/mic.dart'));
+
+  assert.ok(retryBranchCarry(s.db, s.req.id));
+  const queued = getRequest(s.db, s.req.id)!;
+  assert.equal(queued.status, 'approved');
+  assert.equal(queued.startedAt, null);
+  assert.equal(queued.finishedAt, null);
+  assert.equal(queued.mainSha, first.mainSha);
+  assert.equal(queued.reviewOk, true);
+  assert.equal(retryBranchCarry(s.db, s.req.id), false);
+
+  const runner = new FakeRunner([]);
+  const r = await run(s, runner, claimNextApproved(s.db)!);
+  assert.equal(r.status, 'built', r.log);
+  assert.equal(runner.calls.length, 0);
+  assert.equal(r.mainSha, first.mainSha);
+  assert.equal(r.reason, 'Agregué el micrófono al buzón.');
+  const mainBuilds = s.db.prepare(`SELECT COUNT(*) AS n FROM builds WHERE request_id = ? AND branch = 'main'`).get(s.req.id) as { n: number };
+  assert.equal(mainBuilds.n, 1);
+
+  const mine = remoteState(s.remote, 'users/1');
+  assert.equal(mine.read('lib/core/mic.dart'), '// mic in the core\n');
+  assert.ok(mine.files.includes('lib/mine.dart'));
+  assert.equal(r.branchSha, sh(s.remote, 'git', 'rev-parse', 'users/1'));
+  assert.equal(buildForRequest(s.db, s.req.id, 'users/1')!.commitSha, r.branchSha);
+  // Once the branch has it, there is nothing left to retry.
+  assert.equal(retryBranchCarry(s.db, s.req.id), false);
+});
+
+test('retryBranchCarry only matches built changes that reached main but not their own branch', async () => {
+  const s = setup();
+  const id = s.req.id;
+  const reset = (sql: string) => s.db.prepare(`UPDATE requests SET status = 'built', kind = 'change', main_sha = 'abc', branch_sha = NULL, forced = 1, also_main = 0, branch = 'users/1', ${sql} WHERE id = ?`).run(id);
+  const cases: [string, boolean][] = [
+    ['reason = reason', true],
+    ['forced = 0, also_main = 1', true],
+    ['forced = 0, also_main = 0', false],
+    [`status = 'failed'`, false],
+    [`kind = 'revert'`, false],
+    ['main_sha = NULL', false],
+    [`branch_sha = 'def'`, false],
+    [`branch = 'main'`, false],
+  ];
+  for (const [sql, expected] of cases) {
+    reset(sql);
+    assert.equal(retryBranchCarry(s.db, id), expected, sql);
+  }
+  assert.equal(retryBranchCarry(s.db, 9999), false);
 });
 
 test('forced: discarded at review never reaches the repo; a stale diff fails instead of guessing', async () => {

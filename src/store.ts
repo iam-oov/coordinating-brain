@@ -442,6 +442,27 @@ export function decideReview(db: Db, id: number, publish: boolean, now = Date.no
   return res.changes === 1;
 }
 
+export function awaitsBranchCarry(r: Request, mainBranch: string): boolean {
+  return (
+    r.status === 'built' &&
+    r.kind === 'change' &&
+    r.mainSha !== null &&
+    r.branchSha === null &&
+    r.branch !== mainBranch &&
+    (r.alsoMain || r.forced)
+  );
+}
+
+export function retryBranchCarry(db: Db, id: number): boolean {
+  return tx(db, () => {
+    const r = getRequest(db, id);
+    const app = r ? getApp(db, r.appSlug) : null;
+    if (!r || !app || !awaitsBranchCarry(r, app.branch)) return false;
+    db.prepare(`UPDATE requests SET status = 'approved', started_at = NULL, finished_at = NULL WHERE id = ? AND status = 'built'`).run(id);
+    return true;
+  });
+}
+
 export function recordPushedSha(db: Db, id: number, target: 'main' | 'branch', sha: string): void {
   const column = target === 'main' ? 'main_sha' : 'branch_sha';
   db.prepare(`UPDATE requests SET ${column} = ? WHERE id = ?`).run(sha, id);
