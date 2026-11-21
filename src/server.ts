@@ -63,9 +63,6 @@ import {
   STATUS_LABEL,
   USER_STATUS_LABEL,
   capitalizeFirst,
-  fmtDate,
-  fmtDay,
-  fmtWhen,
   html,
   page,
   parseLog,
@@ -74,6 +71,7 @@ import {
   richText,
   richTextRows,
   splitRuns,
+  timeTag,
 } from './web/html.ts';
 import { BRAND_MARK, appDetailPage, footer, landingPage, privacyPage, signInButton } from './web/landing.ts';
 import { MAX_LENGTH, MIN_LENGTH } from './worker/moderation.ts';
@@ -445,7 +443,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return html`<div class="panel panel-version">
       <div class="row" style="justify-content:space-between; align-items:baseline">
         <h3>Your version ${b.versionCode}</h3>
-        <span class="when">Published ${fmtDay(b.createdAt)}</span>
+        <span class="when">Published ${timeTag(b.createdAt, 'day')}</span>
       </div>
       <div class="whats-new">
         <p class="label">What's new</p>
@@ -538,7 +536,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
           ${mine
             ? html`<span class="pill-in">In your version ${v}</span>`
             : html`<span class="status ${r.status === 'built' ? 'trunk' : r.status}">${USER_STATUS_LABEL[r.status] ?? r.status}</span>`}
-          <span class="when">${fmtDay(r.createdAt)}</span>
+          <span class="when">${timeTag(r.createdAt, 'day')}</span>
         </div>
         <p class="idea ${off ? 'off-text' : ''}">${r.text}</p>
         ${aiNote(r.reason)}
@@ -789,14 +787,10 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     </li>`;
   }
 
-  function runTime(run: string, which: 'first' | 'last'): string {
+  function runTime(run: string, which: 'first' | 'last') {
     const stamps = run.match(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z/gm) ?? [];
     const stamp = which === 'first' ? stamps[0] : stamps.at(-1);
-    return stamp ? new Date(stamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
-  }
-
-  function logTime(at: string): string {
-    return new Date(at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    return stamp ? timeTag(Date.parse(stamp), 'time') : '';
   }
 
   function logMessage(text: string) {
@@ -807,7 +801,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
   function logList(run: string) {
     return html`<ol class="log-list">${parseLog(run).map(
       (e) => html`<li class="${e.kind}">
-        <time datetime="${e.at}">${logTime(e.at)}</time>
+        ${timeTag(Date.parse(e.at), 'clock')}
         <div class="log-msg">${logMessage(e.text)}${e.detail ? html`<pre class="log-detail">${e.detail}</pre>` : ''}</div>
       </li>`,
     )}</ol>`;
@@ -823,7 +817,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
       <summary>${ICONS.more}Log</summary>
       <div class="log-panel">
         <div class="log-bar">
-          <span>${runs.length > 1 ? `Run ${runs.length} · ` : ''}${entries} ${entries === 1 ? 'step' : 'steps'}${lastAt ? `, last at ${lastAt}` : ''}</span>
+          <span>${runs.length > 1 ? `Run ${runs.length} · ` : ''}${entries} ${entries === 1 ? 'step' : 'steps'}${lastAt ? html`, last at ${lastAt}` : ''}</span>
           <button type="button" class="secondary copy" data-log="${current}" aria-label="Copy this run's log"
             onclick="var b = this; navigator.clipboard.writeText(b.dataset.log).then(function () { b.lastChild.textContent = 'Copied'; setTimeout(function () { b.lastChild.textContent = 'Copy'; }, 2000); });">${ICONS.copy}<span>Copy</span></button>
         </div>
@@ -859,7 +853,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     const risky = r.flags.length > 0;
     const rejectForm = `reject-${r.id}`;
     return html`<li>
-      <div><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}, ${fmtDate(r.createdAt)}</span></div>
+      <div><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}, ${timeTag(r.createdAt, 'date')}</span></div>
       <p>${r.text}</p>
       ${r.flags.map((f) => html`<div class="flag" role="note">⚠ ${flagLabel(f)}</div>`)}
       <form id="${rejectForm}" method="post" action="/admin/requests/${r.id}/reject"></form>
@@ -919,7 +913,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return html`<li>
       <div class="row" style="justify-content:space-between">
         <span><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}${r.alsoMain ? ', also to main' : ''}
-          · <time datetime="${new Date(at).toISOString()}">${fmtWhen(at)}</time></span></span>
+          · ${timeTag(at, 'when')}</span></span>
         <span class="status ${r.status}">${STATUS_LABEL[r.status]}</span>
       </div>
       <div>${r.text}</div>
@@ -973,7 +967,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
                 (b, i) => html`<li class="build-row">
                   <div class="build-info">
                     <p class="build-title">${buildSummary(b)}</p>
-                    <p class="build-meta">v${b.versionCode} · ${b.commitSha.slice(0, 7)} · ${fmtDate(b.createdAt)}
+                    <p class="build-meta">v${b.versionCode} · ${b.commitSha.slice(0, 7)} · ${timeTag(b.createdAt, 'date')}
                       ${i === 0 ? html` <span class="status built">current</span>` : ''}</p>
                   </div>
                   <form method="post" action="/admin/builds/${b.id}/revert"

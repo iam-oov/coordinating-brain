@@ -5,7 +5,8 @@ import { test } from 'node:test';
 
 import { buildServer } from '../src/server.ts';
 import { addBuild, getRequest, getUser, listRequests, saveReview, upsertApp } from '../src/store.ts';
-import { FORCED_LOG_LINE, RETRY_LOG_PREFIX, capitalizeFirst, fmtWhen, newestFirst, parseLog, richText, splitRuns } from '../src/web/html.ts';
+import { FORCED_LOG_LINE, RETRY_LOG_PREFIX, capitalizeFirst, fmtWhen, newestFirst, parseLog, richText, splitRuns, timeTag } from '../src/web/html.ts';
+import type { TimeFormat } from '../src/web/html.ts';
 import { JEEP_OBD2 } from '../src/apps.ts';
 import type { App } from '../src/store.ts';
 import type { FakeGoogle, IdTokenClaims } from './helpers.ts';
@@ -793,7 +794,58 @@ test('admin history rows show when they finished: the time for today, the day ot
   insertIdea(s, { text: 'Idea finished in January', status: 'built', finishedAt });
   const admin = await webLogin(s, ADMIN, '/admin');
   const history = (await s.server.inject({ method: 'GET', url: '/admin?hist=all', headers: { cookie: admin.cookie } })).body;
-  assert.match(history, /by osvaldo\s*· <time datetime="2026-01-15T12:00:00\.000Z">Jan 15, 2026<\/time><\/span>/);
+  assert.match(history, /by osvaldo\s*· <time datetime="2026-01-15T12:00:00\.000Z" data-fmt="when">Jan 15, 2026<\/time><\/span>/);
+});
+
+test('every date renders as a <time> with its UTC instant and the server text as the no-JS fallback', async () => {
+  const at = Date.UTC(2026, 10, 21, 4, 45, 12);
+  const iso = '2026-11-21T04:45:12.000Z';
+  const clockOf = (ms: number) => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  const timeOf = (ms: number) => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  // The fallback must stay exactly what the server printed before the browser took over.
+  const fallback: Record<TimeFormat, string> = {
+    day: new Date(at).toLocaleDateString('en-US', { dateStyle: 'medium' }),
+    date: new Date(at).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }),
+    when: fmtWhen(at),
+    time: timeOf(at),
+    clock: clockOf(at),
+  };
+  for (const [format, text] of Object.entries(fallback)) {
+    assert.equal(String(timeTag(at, format as TimeFormat)), `<time datetime="${iso}" data-fmt="${format}">${text}</time>`);
+  }
+  assert.equal(timeTag(null, 'day'), '');
+  assert.equal(timeTag(Date.parse('not a date'), 'clock'), '');
+
+  const has = (body: string, fragment: string) => assert.ok(body.includes(fragment), `missing: ${fragment}`);
+  const s = await setup();
+  await login(s, OSVALDO, 'demo');
+  const built = insertIdea(s, { text: 'Idea published at night', status: 'built', createdAt: at });
+  addBuild(s.db, { requestId: built, appSlug: 'demo', branch: 'users/1', versionCode: 6, apkFile: 'a.apk', commitSha: 'aaaaaaa111' }, at);
+  const running = insertIdea(s, { text: 'Idea being built', status: 'running', createdAt: at });
+  const firstRun = Date.parse('2026-11-21T03:10:05.000Z');
+  const lastStep = Date.parse('2026-11-21T04:46:30.500Z');
+  const log = ['2026-11-21T03:10:05.000Z Clonando (main)', `${iso} ${FORCED_LOG_LINE}`, '2026-11-21T04:46:30.500Z Intento 1/3', ''];
+  s.db.prepare('UPDATE requests SET log = ? WHERE id = ?').run(log.join('\n'), running);
+  insertIdea(s, { text: 'Idea waiting for approval', status: 'pending', createdAt: at });
+
+  const { cookie } = await webLogin(s, OSVALDO);
+  const portal = (await s.server.inject({ method: 'GET', url: '/apks?app=demo', headers: { cookie } })).body;
+  has(portal, `Published <time datetime="${iso}" data-fmt="day">${fallback.day}</time>`);
+  has(portal, `<span class="when"><time datetime="${iso}" data-fmt="day">${fallback.day}</time></span>`);
+  assert.equal(portal.match(/querySelectorAll\('time\[data-fmt\]'\)/g)?.length, 1);
+  // A date never breaks across lines, e.g. "Nov / 20, 2026" in the narrow history meta.
+  assert.match(portal, /time\[data-fmt\] \{ white-space:nowrap; \}/);
+
+  const admin = await webLogin(s, ADMIN, '/admin');
+  const queue = (await s.server.inject({ method: 'GET', url: '/admin', headers: { cookie: admin.cookie } })).body;
+  has(queue, `by osvaldo, <time datetime="${iso}" data-fmt="date">${fallback.date}</time></span>`);
+  has(queue, `<time datetime="2026-11-21T04:46:30.500Z" data-fmt="clock">${clockOf(lastStep)}</time>`);
+  has(queue, `, last at <time datetime="2026-11-21T04:46:30.500Z" data-fmt="time">${timeOf(lastStep)}</time></span>`);
+  has(queue, `Run 1, started at <time datetime="2026-11-21T03:10:05.000Z" data-fmt="time">${timeOf(firstRun)}</time></p>`);
+  assert.equal(queue.match(/querySelectorAll\('time\[data-fmt\]'\)/g)?.length, 1);
+
+  const builds = (await s.server.inject({ method: 'GET', url: '/admin?app=demo', headers: { cookie: admin.cookie } })).body;
+  has(builds, `v6 · aaaaaaa · <time datetime="${iso}" data-fmt="date">${fallback.date}</time>`);
 });
 
 test('the greeting capitalizes only the first letter of the Google name, for display', () => {

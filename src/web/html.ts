@@ -66,6 +66,7 @@ h3 { font-size:1rem; font-weight:650; margin:16px 0 6px; color:var(--muted); }
 a { color:var(--branch); text-underline-offset:.18em; }
 :focus-visible { outline:3px solid var(--focus); outline-offset:2px; border-radius:6px; }
 .muted { color:var(--muted); font-size:.92rem; }
+time[data-fmt] { white-space:nowrap; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:18px; margin:16px 0; }
 .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
 input[type=text], textarea { font:inherit; padding:12px 14px; border-radius:12px; border:1px solid var(--field);
@@ -326,6 +327,7 @@ function refreshScript(seconds: number): string {
 
 export function page(title: string, body: Raw, opts: { refreshSec?: number; bodyClass?: string } = {}): string {
   const refresh = opts.refreshSec ? refreshScript(opts.refreshSec) : '';
+  const localTime = body.value.includes('data-fmt="') ? LOCAL_TIME_SCRIPT : '';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -336,7 +338,7 @@ export function page(title: string, body: Raw, opts: { refreshSec?: number; body
 ${FONTS}
 <style>${STYLE}</style>
 </head>
-<body${opts.bodyClass ? ` class="${esc(opts.bodyClass)}"` : ''}><main>${body.value}</main>${refresh}</body>
+<body${opts.bodyClass ? ` class="${esc(opts.bodyClass)}"` : ''}><main>${body.value}</main>${localTime}${refresh}</body>
 </html>`;
 }
 
@@ -452,6 +454,44 @@ export function fmtWhen(ms: number | null, now = Date.now()): string {
   if (!ms) return '';
   return new Date(ms).toDateString() === new Date(now).toDateString() ? fmtDate(ms) : fmtDay(ms);
 }
+
+const TIME_OPTIONS = {
+  time: { hour: 'numeric', minute: '2-digit' },
+  clock: { hour: 'numeric', minute: '2-digit', second: '2-digit' },
+} as const;
+
+export function fmtTime(ms: number | null): string {
+  return ms ? new Date(ms).toLocaleTimeString('en-US', TIME_OPTIONS.time) : '';
+}
+
+export function fmtClock(ms: number | null): string {
+  return ms ? new Date(ms).toLocaleTimeString('en-US', TIME_OPTIONS.clock) : '';
+}
+
+const TIME_TEXT = { day: fmtDay, date: fmtDate, when: fmtWhen, time: fmtTime, clock: fmtClock };
+
+export type TimeFormat = keyof typeof TIME_TEXT;
+
+export function timeTag(ms: number | null, format: TimeFormat): Raw | '' {
+  if (!ms) return '';
+  return html`<time datetime="${new Date(ms).toISOString()}" data-fmt="${format}">${TIME_TEXT[format](ms)}</time>`;
+}
+
+const LOCAL_TIME_SCRIPT = `<script>(function () {
+  var options = {
+    day: { dateStyle: 'medium' },
+    date: { dateStyle: 'medium', timeStyle: 'short' },
+    time: ${JSON.stringify(TIME_OPTIONS.time)},
+    clock: ${JSON.stringify(TIME_OPTIONS.clock)}
+  };
+  var today = new Date().toDateString();
+  document.querySelectorAll('time[data-fmt]').forEach(function (el) {
+    var at = new Date(el.getAttribute('datetime'));
+    if (isNaN(at)) return;
+    var format = el.dataset.fmt === 'when' ? (at.toDateString() === today ? 'date' : 'day') : el.dataset.fmt;
+    if (options[format]) el.textContent = at.toLocaleString('en-US', options[format]);
+  });
+})();</script>`;
 
 function noteLines(text: string): string[] {
   return text
