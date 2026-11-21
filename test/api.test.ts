@@ -5,6 +5,7 @@ import { test } from 'node:test';
 
 import { buildServer } from '../src/server.ts';
 import { addBuild, getRequest, listRequests, saveReview, upsertApp } from '../src/store.ts';
+import { newestFirst } from '../src/web/html.ts';
 import { JEEP_OBD2 } from '../src/apps.ts';
 import type { App } from '../src/store.ts';
 import type { FakeGoogle, IdTokenClaims } from './helpers.ts';
@@ -525,4 +526,25 @@ test('admin: filter by app, history starts collapsed and is paged; favicon and l
   const icon = await s.server.inject({ method: 'GET', url: '/favicon.svg' });
   assert.equal(icon.headers['content-type'], 'image/svg+xml');
   assert.match(all, /<link rel="icon" href="\/favicon.svg"/);
+});
+
+test('logs read newest first, keeping multi-line entries in order', () => {
+  const log = [
+    '2026-11-21T02:15:21.234Z Preparación: flutter pub get',
+    '2026-11-21T02:15:45.215Z Pruebas fallaron (código 1)',
+    "  error • undefined method • lib/core/mic.dart:12:5",
+    '36 issues found.',
+    '2026-11-21T02:15:45.249Z Intento 2/3',
+    '',
+  ].join('\n');
+  assert.equal(
+    newestFirst(log),
+    [
+      '2026-11-21T02:15:45.249Z Intento 2/3',
+      '2026-11-21T02:15:45.215Z Pruebas fallaron (código 1)',
+      "  error • undefined method • lib/core/mic.dart:12:5",
+      '36 issues found.',
+      '2026-11-21T02:15:21.234Z Preparación: flutter pub get',
+    ].join('\n'),
+  );
 });

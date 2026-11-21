@@ -52,7 +52,7 @@ import {
 import { appPage } from './web/catalog.ts';
 import { errorMessage, flagLabel } from './web/copy.ts';
 import { FAVICON_SVG, ICONS } from './web/icons.ts';
-import { API_STATUS_LABEL, STATUS_LABEL, USER_STATUS_LABEL, fmtDate, fmtDay, html, page, raw, renderDiff } from './web/html.ts';
+import { API_STATUS_LABEL, STATUS_LABEL, USER_STATUS_LABEL, fmtDate, fmtDay, html, newestFirst, page, raw, renderDiff } from './web/html.ts';
 import { BRAND_MARK, appDetailPage, footer, landingPage, privacyPage, signInButton } from './web/landing.ts';
 import { MAX_LENGTH, MIN_LENGTH } from './worker/moderation.ts';
 
@@ -783,7 +783,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
       <p>${r.text}</p>
       ${r.reason ? html`<p class="muted">${r.reason}</p>` : ''}
       <details open><summary>Code changes</summary><pre class="diff">${renderDiff(r.reviewPatch ?? '')}</pre></details>
-      ${r.log ? html`<details><summary class="muted">Log</summary><pre>${r.log}</pre></details>` : ''}
+      ${r.log ? html`<details><summary class="muted">Log, newest first</summary><pre>${newestFirst(r.log)}</pre></details>` : ''}
       <div class="row">
         <form method="post" action="/admin/requests/${r.id}/publish"><button>${ICONS.publish}Publish to main and ${r.branch}</button></form>
         <form method="post" action="/admin/requests/${r.id}/discard"
@@ -801,7 +801,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
       </div>
       <div>${r.text}</div>
       ${r.reason ? html`<div class="muted">${r.reason}</div>` : ''}
-      ${r.log ? html`<details ${openLog ? 'open' : ''}><summary class="muted">Log</summary><pre>${r.log}</pre></details>` : ''}
+      ${r.log ? html`<details ${openLog ? 'open' : ''}><summary class="muted">Log, newest first</summary><pre>${newestFirst(r.log)}</pre></details>` : ''}
       ${forceable
         ? html`<details class="confirm"><summary>${ICONS.bolt}Force…</summary>
             <p>Builds #${r.id} again with the core, dependencies and Android permissions unlocked. It goes to main, for

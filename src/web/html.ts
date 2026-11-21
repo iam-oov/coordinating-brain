@@ -300,6 +300,17 @@ export const USER_STATUS_LABEL: Record<string, string> = {
   discarded: 'Discarded',
 };
 
+const LOG_ENTRY_START = /^(?:\d{4}-\d{2}-\d{2}T|…$)/;
+
+export function newestFirst(log: string): string {
+  const entries: string[] = [];
+  for (const line of log.replace(/\n+$/, '').split('\n')) {
+    if (entries.length === 0 || LOG_ENTRY_START.test(line)) entries.push(line);
+    else entries[entries.length - 1] += `\n${line}`;
+  }
+  return entries.reverse().join('\n');
+}
+
 export function renderDiff(patch: string): Raw {
   const lines = patch.split('\n').map((line) => {
     const kind = /^(diff --git|\+\+\+|---|@@)/.test(line) ? 'meta' : line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : '';
