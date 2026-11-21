@@ -266,11 +266,11 @@ test('portal: Google button, then the user sees only their apps and can download
   assert.match(portal.body, /Hola, osvaldo/);
   assert.match(portal.body, /Demo/);
   assert.doesNotMatch(portal.body, /Inglés/);
-  assert.match(portal.body, /Todavía no tienes una versión propia/);
+  assert.match(portal.body, /Aún no tienes tu versión/);
 
   publishBuild(s, 7, 'abcdef1234', 'APKDATA', 'users/1');
   portal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie } });
-  assert.match(portal.body, /Descargar tu versión 7/);
+  assert.match(portal.body, /Descargar versión 7/);
   const apk = await s.server.inject({ method: 'GET', url: '/apks/demo/latest.apk', headers: { cookie } });
   assert.equal(apk.statusCode, 200);
   assert.equal(apk.body, 'APKDATA');
@@ -361,7 +361,7 @@ test('downloads: only your own build; a new user gets none, not main\'s or anoth
   assert.equal(apps[0].latest, null);
   const anaWeb = await webLogin(s, ANA);
   const portal = await s.server.inject({ method: 'GET', url: '/apks', headers: { cookie: anaWeb.cookie } });
-  assert.match(portal.body, /Todavía no tienes una versión propia/);
+  assert.match(portal.body, /Aún no tienes tu versión/);
   assert.equal((await s.server.inject({ method: 'GET', url: '/apks/demo/latest.apk', headers: { cookie: anaWeb.cookie } })).statusCode, 404);
 });
 
@@ -445,6 +445,9 @@ test('portal form: a refused idea keeps the typed text with the error; a sent on
   assert.equal(sent.headers.location, '/apks?enviada=demo');
   const portal = await s.server.inject({ method: 'GET', url: '/apks?enviada=demo', headers: { cookie } });
   assert.match(portal.body, /Idea enviada para Demo/);
+  assert.match(portal.body, /<h3 id="ideas-demo">Tus ideas<\/h3>/);
+  assert.match(portal.body, /<details class="idea-toggle"><summary>/);
+  assert.match(portal.body, /<body class="portal">/);
   assert.match(portal.body, /Esperando aprobación/);
 });
 

@@ -47,7 +47,7 @@ import {
   userCanUseApp,
 } from './store.ts';
 import { appPage } from './web/catalog.ts';
-import { STATUS_LABEL, USER_STATUS_LABEL, fmtDate, html, page, renderDiff } from './web/html.ts';
+import { STATUS_LABEL, USER_STATUS_LABEL, fmtDate, fmtDay, html, page, raw, renderDiff } from './web/html.ts';
 import { BRAND_MARK, appDetailPage, footer, landingPage, privacyPage, signInButton } from './web/landing.ts';
 import { MAX_LENGTH, MIN_LENGTH } from './worker/moderation.ts';
 
@@ -56,6 +56,21 @@ const SESSION_COOKIE = 'cb_session';
 const OAUTH_COOKIE = 'cb_oauth';
 const OAUTH_COOKIE_PATH = '/auth/google';
 const LOGIN_NEXT = ['/apks', '/admin'];
+const DOWNLOAD_ICON = raw(
+  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>',
+);
+const GLOBE_ICON = raw(
+  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18"/><path d="M12 3a14 14 0 0 0 0 18"/></svg>',
+);
+const PLUS_ICON = raw(
+  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+);
+const CROSS_ICON = raw(
+  '<svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6"/></svg>',
+);
+const SEED_BRANCH = raw(
+  '<svg width="40" height="56" viewBox="0 0 40 56" fill="none" stroke-linecap="round" aria-hidden="true" style="flex:none"><path d="M8 2v52" stroke="var(--fg)" stroke-width="3"/><path d="M8 16c0 10 22 6 22 18v20" stroke="var(--branch)" stroke-width="3" stroke-dasharray="4 6"/><circle cx="30" cy="46" r="5" fill="var(--bg)" stroke="var(--branch)" stroke-width="2.5"/></svg>',
+);
 const ADMIN_REFRESH_SEC = 10;
 
 export interface ServerDeps {
@@ -295,15 +310,19 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
             <form method="post" action="/apks/logout"><button class="secondary">Salir</button></form>
           </div>
         </header>
-        <h1>Tus apps</h1>
-        <p class="muted">Hola, ${name}.</p>
+        <div class="portal-head">
+          <p>Hola, ${name}</p>
+          <h1>Tus apps</h1>
+        </div>
         ${sentTo
-          ? html`<p class="notice" role="status">Idea enviada para ${sentTo.name}. El dueño la revisará; su estado aparece abajo.</p>`
+          ? html`<p class="notice" role="status">Idea enviada para ${sentTo.name}. El dueño la revisará; su estado aparece en Tus ideas.</p>`
           : ''}
         ${apps.length === 0 ? html`<div class="card">Tu cuenta todavía no tiene apps asignadas.</div>` : ''}
         ${apps.map((a) => portalAppCard(a, uid, notice.draft?.slug === a.slug ? notice.draft : undefined))}
         ${footer()}
+        <script>if (matchMedia('(min-width: 860px)').matches) document.querySelectorAll('details.idea-toggle').forEach(function (d) { d.open = true; });</script>
       `,
+      { bodyClass: 'portal' },
     );
   }
 
@@ -314,55 +333,108 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return renderPortal(req, uid, { sentTo: req.query.enviada });
   });
 
+  function versionPanel(a: App, b: Build, included: number) {
+    return html`<div class="panel panel-version">
+      <div class="row" style="justify-content:space-between; align-items:baseline">
+        <h3>Tu versión ${b.versionCode}</h3>
+        <span class="when">Publicada el ${fmtDay(b.createdAt)}</span>
+      </div>
+      <p class="muted">Trae ${included} ${included === 1 ? 'idea tuya' : 'ideas tuyas'} sobre la versión base. Se instala encima de la que
+        tienes, sin perder tus datos.</p>
+      <div class="actions">
+        <a class="button" href="/apks/${a.slug}/latest.apk">${DOWNLOAD_ICON}Descargar versión ${b.versionCode}</a>
+        <details class="hint"><summary>¿Cómo instalarla?</summary>
+          <p>Si Android pregunta, permite que el navegador instale apps solo para esta instalación.</p>
+        </details>
+      </div>
+    </div>`;
+  }
+
+  function emptyPanel(a: App) {
+    const base = latestBuildOn(db, a.slug, a.branch);
+    return html`<div class="panel-empty">
+      ${SEED_BRANCH}
+      <div>
+        <h3>Aún no tienes tu versión</h3>
+        <p>La tendrás cuando el dueño apruebe y publique tu primera idea. Mientras tanto, usa la versión base de ${a.name}.</p>
+        ${base && appPage(a.slug) ? html`<a class="button secondary" href="/apps/${a.slug}/apk">Descargar la versión base</a>` : ''}
+      </div>
+    </div>`;
+  }
+
+  function ideaPanel(a: App, firstIdea: boolean, primary: boolean, draft?: Draft) {
+    const fieldId = `idea-${a.slug}`;
+    const form = html`<form class="panel panel-idea" method="post" action="/apks/${a.slug}/requests">
+      <h3>${firstIdea ? 'Tu primera idea' : 'Nueva idea'}</h3>
+      <p class="muted">Una idea por solicitud. Si el dueño la aprueba, llega a tu versión.</p>
+      <label class="field" for="${fieldId}">¿Qué cambiarías de ${a.name}?</label>
+      <textarea id="${fieldId}" name="text" rows="6" minlength="${MIN_LENGTH}" maxlength="${MAX_LENGTH}" required
+        aria-describedby="${fieldId}-help" placeholder="Por ejemplo: agregar un modo oscuro"
+        oninput="this.form.querySelector('.count').textContent = this.value.length + ' / ${MAX_LENGTH}'">${draft?.text ?? ''}</textarea>
+      <div class="field-foot">
+        <span id="${fieldId}-help" class="hint">Entre ${MIN_LENGTH} y ${MAX_LENGTH} caracteres</span>
+        <span class="count hint" aria-hidden="true">${(draft?.text ?? '').length} / ${MAX_LENGTH}</span>
+      </div>
+      <p class="public-note">${GLOBE_ICON}Tu idea y el código que genere serán públicos en GitHub. No escribas datos personales.</p>
+      ${draft ? html`<p class="error" role="alert">${draft.error}</p>` : ''}
+      <button class="${primary ? '' : 'secondary'}">Enviar idea</button>
+    </form>`;
+    if (firstIdea || draft) return form;
+    return html`<details class="idea-toggle"><summary>${PLUS_ICON}Nueva idea</summary>${form}</details>`;
+  }
+
+  function branchTimeline(a: App, reqs: Request[], versionOf: (r: Request) => number | undefined) {
+    if (reqs.length === 0) return '';
+    return html`<section class="branch" aria-labelledby="ideas-${a.slug}">
+      <h3 id="ideas-${a.slug}">Tus ideas</h3>
+      <ol class="timeline">
+        ${reqs.map((r) => {
+          const v = versionOf(r);
+          const off = ['failed', 'discarded', 'rejected'].includes(r.status);
+          const node = r.status === 'built' ? 'in' : off ? 'off' : '';
+          return html`<li>
+            <span class="node ${node}" aria-hidden="true">${off ? CROSS_ICON : ''}</span>
+            <div style="flex:1; min-width:0">
+              <div class="meta">
+                ${r.status === 'built'
+                  ? html`<span class="pill-in">${v ? `En tu versión ${v}` : USER_STATUS_LABEL.built}</span>`
+                  : html`<span class="status ${r.status}">${USER_STATUS_LABEL[r.status] ?? r.status}</span>`}
+                <span class="when">${fmtDay(r.createdAt)}</span>
+              </div>
+              <p class="idea ${off ? 'off-text' : ''}">${r.text}</p>
+              ${r.reason ? html`<p class="note">${r.reason}</p>` : ''}
+            </div>
+          </li>`;
+        })}
+        <li aria-hidden="true"><span class="node root"></span><p class="base">Parten de la versión base</p></li>
+      </ol>
+    </section>`;
+  }
+
   function portalAppCard(a: App, uid: number, draft?: Draft) {
     const b = latestBuildFor(db, a, uid);
     const branch = userBranch(uid);
-    const reqs = listRequests(db, { userId: uid, appSlug: a.slug, limit: 5 });
+    const reqs = listRequests(db, { userId: uid, appSlug: a.slug, limit: 8 });
     const versionOf = (r: Request) => (r.status === 'built' ? buildForRequest(db, r.id, branch)?.versionCode : undefined);
     const included = b
-      ? listRequests(db, { userId: uid, appSlug: a.slug, limit: 50 }).filter((r) => {
+      ? listRequests(db, { userId: uid, appSlug: a.slug, limit: 200 }).filter((r) => {
           const v = versionOf(r);
           return v !== undefined && v <= b.versionCode;
-        })
-      : [];
-    const fieldId = `idea-${a.slug}`;
+        }).length
+      : 0;
+    const info = appPage(a.slug);
     return html`
-      <section class="card">
-        <h2>${a.name}</h2>
-        ${b
-          ? html`<p><a class="button" href="/apks/${a.slug}/latest.apk">Descargar tu versión ${b.versionCode}</a></p>
-              <p class="muted">Publicada el ${fmtDate(b.createdAt)}</p>
-              ${included.length
-                ? html`<p class="target">Incluye tus ideas:</p>
-                    <ul class="includes">${included.slice(0, 5).map((r) => html`<li>${r.text}</li>`)}</ul>
-                    ${included.length > 5 ? html`<p class="muted">y ${included.length - 5} más.</p>` : ''}`
-                : ''}
-              <details class="hint"><summary>¿Cómo instalarla?</summary>
-                <p>Se instala encima de la que tienes, sin perder tus datos. Si Android pregunta, permite que el
-                  navegador instale apps solo para esta instalación.</p>
-              </details>`
-          : html`<p class="muted">Todavía no tienes una versión propia de ${a.name}. Envía una idea y, cuando se publique, podrás descargarla aquí.</p>`}
-        <form method="post" action="/apks/${a.slug}/requests">
-          <label class="field" for="${fieldId}">Tu idea para ${a.name}</label>
-          <textarea id="${fieldId}" name="text" rows="3" minlength="${MIN_LENGTH}" maxlength="${MAX_LENGTH}" required
-            aria-describedby="${fieldId}-help" placeholder="Por ejemplo: agregar un modo oscuro"
-            oninput="this.form.querySelector('.count').textContent = this.value.length + ' / ${MAX_LENGTH}'">${draft?.text ?? ''}</textarea>
-          <div class="field-foot">
-            <span id="${fieldId}-help" class="hint">Entre ${MIN_LENGTH} y ${MAX_LENGTH} caracteres. Será pública en GitHub: no escribas datos personales.</span>
-            <span class="count hint" aria-hidden="true">${(draft?.text ?? '').length} / ${MAX_LENGTH}</span>
-          </div>
-          ${draft ? html`<p class="error" role="alert">${draft.error}</p>` : ''}
-          <p><button>Enviar idea</button></p>
-        </form>
-        ${reqs.length
-          ? html`<h3>Tus ideas</h3><ul class="list">${reqs.map((r) => {
-              const v = versionOf(r);
-              return html`<li><div class="row" style="justify-content:space-between">
-                <span>${r.text}</span>
-                <span class="row">${v ? html`<span class="version">En v${v}</span>` : ''}<span class="status ${r.status}">${USER_STATUS_LABEL[r.status] ?? r.status}</span></span></div>
-                ${r.reason ? html`<div class="muted">${r.reason}</div>` : ''}</li>`;
-            })}</ul>`
-          : ''}
+      <section class="app-block" aria-labelledby="app-${a.slug}">
+        <div class="app-title">
+          ${info ? html`<span class="app-icon">${info.icon}</span>` : ''}
+          <h2 id="app-${a.slug}">${a.name}</h2>
+          ${info ? html`<a class="more" href="/apps/${a.slug}">Ver la app</a>` : ''}
+        </div>
+        <div class="app-grid">
+          ${b ? versionPanel(a, b, included) : emptyPanel(a)}
+          ${ideaPanel(a, reqs.length === 0, !b, draft)}
+          ${branchTimeline(a, reqs, versionOf)}
+        </div>
       </section>`;
   }
 
