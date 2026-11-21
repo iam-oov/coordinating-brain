@@ -68,3 +68,20 @@ test('a failing command reports its output and the unit failure; every run gets 
   assert.equal(new Set(ids).size, 2);
   assert.ok(fs.existsSync(path.join(work, '.git', 'config')));
 });
+
+test('packages that pub extracted as owner-only become readable by the sandbox group before each run', async () => {
+  const root = tempDir('brain-sandbox-');
+  const cache = tempDir('brain-pubcache-');
+  const pkg = path.join(cache, 'hosted', 'pub.dev', 'google_sign_in-7.2.0', 'lib');
+  fs.mkdirSync(pkg, { recursive: true });
+  fs.writeFileSync(path.join(pkg, 'google_sign_in.dart'), '// lib\n');
+  fs.chmodSync(path.join(pkg, 'google_sign_in.dart'), 0o600);
+  for (const d of [pkg, path.dirname(pkg)]) fs.chmodSync(d, 0o700);
+  const { bin } = fakeSystemctl(root);
+  const box = new SystemdSandbox(root, bin, [cache]);
+  const r = await box.run(workCopy(), 'true', 60_000);
+  assert.equal(r.code, 0, r.output);
+  assert.equal(fs.statSync(path.dirname(pkg)).mode & 0o050, 0o050);
+  assert.equal(fs.statSync(path.join(pkg, 'google_sign_in.dart')).mode & 0o040, 0o040);
+  assert.equal(fs.statSync(path.join(pkg, 'google_sign_in.dart')).mode & 0o010, 0);
+});

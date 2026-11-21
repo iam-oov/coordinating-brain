@@ -35,7 +35,8 @@ if (config.workerEnabled && !config.sandbox) {
   const apiKey = process.env.ANTHROPIC_API_KEY ?? '';
   if (config.claude.bare && !apiKey) console.warn('ANTHROPIC_API_KEY is missing: Claude Code runs will fail in --bare mode.');
   const secrets = brainSecretPaths(config, process.env.HOME ?? '/nonexistent', process.cwd());
-  const sandbox = config.sandbox === 'systemd' ? new SystemdSandbox(config.sandboxDir) : new DirectSandbox();
+  const sharedCaches = process.env.PUB_CACHE ? [process.env.PUB_CACHE] : [];
+  const sandbox = config.sandbox === 'systemd' ? new SystemdSandbox(config.sandboxDir, 'systemctl', sharedCaches) : new DirectSandbox();
   if (config.sandbox === 'none') console.warn('SANDBOX=none: the AI-written tests run without isolation.');
   worker = startWorker({ db, config, sandbox, runner: new ClaudeCliRunner(config.claude, apiKey, secrets) }, config.workerPollMs);
 }
