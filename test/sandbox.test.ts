@@ -31,6 +31,8 @@ function workCopy(): string {
     '.dart_tool/package_config.json': '{}\n',
     '.git/config': 'secret remote\n',
     'build/app.apk': 'apk\n',
+    '.dart_tool/hooks_runner/shared/objective_c/.lock': '',
+    '.dart_tool/flutter_build/abc/app.dill': 'dill\n',
   })) {
     fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
     fs.writeFileSync(path.join(dir, file), content);
@@ -43,6 +45,7 @@ test('the sandbox runs the command on a copy without .git or build, then removes
   const { bin, calls } = fakeSystemctl(root);
   const box = new SystemdSandbox(root, bin);
   const r = await box.run(workCopy(), 'ls -A lib .dart_tool; ls -A; echo TESTS_OK', 60_000);
+  assert.doesNotMatch(r.output, /hooks_runner|flutter_build/);
 
   assert.equal(r.code, 0, r.output);
   assert.match(r.output, /main\.dart/);

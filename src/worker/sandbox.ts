@@ -16,7 +16,7 @@ export class DirectSandbox implements TestSandbox {
   }
 }
 
-const SKIPPED = new Set(['.git', 'build']);
+const SKIPPED = new Set(['.git', 'build', '.dart_tool/hooks_runner', '.dart_tool/flutter_build']);
 
 /**
  * Copies the working copy to <root>/<id> and runs the command there through the
