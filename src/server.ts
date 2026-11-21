@@ -59,11 +59,14 @@ import {
   USER_STATUS_LABEL,
   fmtDate,
   fmtDay,
+  fmtWhen,
   html,
   page,
   parseLog,
   raw,
   renderDiff,
+  richText,
+  richTextRows,
   splitRuns,
 } from './web/html.ts';
 import { BRAND_MARK, appDetailPage, footer, landingPage, privacyPage, signInButton } from './web/landing.ts';
@@ -90,6 +93,14 @@ const SEED_BRANCH = raw(
   '<svg width="40" height="56" viewBox="0 0 40 56" fill="none" stroke-linecap="round" aria-hidden="true" style="flex:none"><path d="M8 2v52" stroke="var(--fg)" stroke-width="3"/><path d="M8 16c0 10 22 6 22 18v20" stroke="var(--branch)" stroke-width="3" stroke-dasharray="4 6"/><circle cx="30" cy="46" r="5" fill="var(--bg)" stroke="var(--branch)" stroke-width="2.5"/></svg>',
 );
 const ADMIN_REFRESH_SEC = 10;
+const NOTE_ROWS = 3;
+
+function aiNote(text: string | null) {
+  if (!text) return '';
+  const body = html`<p class="note-text">${richText(text)}</p>`;
+  if (richTextRows(text) <= NOTE_ROWS) return html`<div class="note">${body}</div>`;
+  return html`<div class="note clamp">${body}<details class="more-text"><summary>${ICONS.more}<span class="more">Show more</span><span class="less">Show less</span></summary></details></div>`;
+}
 
 export interface ServerDeps {
   config: Config;
@@ -336,7 +347,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
 
   const IDEA_FILTERS: { key: string; label: string; statuses?: RequestStatus[] }[] = [
     { key: 'all', label: 'All' },
-    { key: 'built', label: 'In your version', statuses: ['built'] },
+    { key: 'built', label: 'Published', statuses: ['built'] },
     { key: 'open', label: 'In progress', statuses: ['pending', 'approved', 'running', 'review'] },
     { key: 'closed', label: 'Not published', statuses: ['failed', 'discarded', 'rejected'] },
   ];
@@ -511,18 +522,19 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
 
   function ideaItem(r: Request, v: number | undefined) {
     const off = ['failed', 'discarded', 'rejected'].includes(r.status);
-    const node = r.status === 'built' ? 'in' : off ? 'off' : '';
+    const mine = r.status === 'built' && v !== undefined;
+    const node = mine ? 'in' : r.status === 'built' ? 'trunk' : off ? 'off' : '';
     return html`<li>
       <span class="node ${node}" aria-hidden="true">${off ? ICONS.cross : ''}</span>
       <div style="flex:1; min-width:0">
         <div class="meta">
-          ${r.status === 'built'
-            ? html`<span class="pill-in">${v ? `In your version ${v}` : USER_STATUS_LABEL.built}</span>`
-            : html`<span class="status ${r.status}">${USER_STATUS_LABEL[r.status] ?? r.status}</span>`}
+          ${mine
+            ? html`<span class="pill-in">In your version ${v}</span>`
+            : html`<span class="status ${r.status === 'built' ? 'trunk' : r.status}">${USER_STATUS_LABEL[r.status] ?? r.status}</span>`}
           <span class="when">${fmtDay(r.createdAt)}</span>
         </div>
         <p class="idea ${off ? 'off-text' : ''}">${r.text}</p>
-        ${r.reason ? html`<p class="note">${r.reason}</p>` : ''}
+        ${aiNote(r.reason)}
       </div>
     </li>`;
   }
@@ -870,7 +882,7 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
     return html`<li>
       <div><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}</span></div>
       <p>${r.text}</p>
-      ${r.reason ? html`<p class="muted">${r.reason}</p>` : ''}
+      ${aiNote(r.reason)}
       <details open class="changes"><summary>Code changes <span class="muted">${diffStats(r.reviewPatch ?? '')}</span></summary>
         <pre class="diff">${renderDiff(r.reviewPatch ?? '')}</pre></details>
       ${r.log ? logBlock(r.log) : ''}
@@ -890,13 +902,15 @@ export function buildServer({ config, db, google, wakeWorker }: ServerDeps): Fas
 
   function adminHistoryItem(r: Request, openLog = false) {
     const forceable = r.kind === 'change' && (r.status === 'failed' || r.status === 'discarded');
+    const at = r.finishedAt ?? r.decidedAt ?? r.createdAt;
     return html`<li>
       <div class="row" style="justify-content:space-between">
-        <span><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}${r.alsoMain ? ', also to main' : ''}</span></span>
+        <span><strong>#${r.id} ${appName(r.appSlug)}</strong> <span class="muted">by ${r.userName ?? 'system'}${r.alsoMain ? ', also to main' : ''}
+          · <time datetime="${new Date(at).toISOString()}">${fmtWhen(at)}</time></span></span>
         <span class="status ${r.status}">${STATUS_LABEL[r.status]}</span>
       </div>
       <div>${r.text}</div>
-      ${r.reason ? html`<div class="muted">${r.reason}</div>` : ''}
+      ${aiNote(r.reason)}
       ${r.log ? logBlock(r.log, openLog) : ''}
       ${forceable
         ? html`<details class="confirm"><summary>${ICONS.bolt}Force…</summary>

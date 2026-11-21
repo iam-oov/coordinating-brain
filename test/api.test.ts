@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 import { buildServer } from '../src/server.ts';
 import { addBuild, getRequest, listRequests, saveReview, upsertApp } from '../src/store.ts';
-import { FORCED_LOG_LINE, newestFirst, parseLog, splitRuns } from '../src/web/html.ts';
+import { FORCED_LOG_LINE, fmtWhen, newestFirst, parseLog, richText, splitRuns } from '../src/web/html.ts';
 import { JEEP_OBD2 } from '../src/apps.ts';
 import type { App } from '../src/store.ts';
 import type { FakeGoogle, IdTokenClaims } from './helpers.ts';
@@ -600,4 +600,92 @@ test('log entries are parsed into timed steps with errors, successes and attempt
   assert.deepEqual(entries.map((e) => e.kind), ['ok', 'step', 'err', '', '']);
   assert.equal(entries[2].detail, '  error • undefined name\n36 issues found.');
   assert.equal(entries[4].text, 'Clonando git@github.com:iam-oov/jeep-obd2.git (main)');
+});
+
+const AI_SUMMARY = [
+  '**Qué corregí:**',
+  '- La lista de dispositivos ahora se ordena por señal en `lib/ui/devices_screen.dart`',
+  '- Agregué una prueba en `test/devices_test.dart`',
+  '',
+  '**Por qué:**',
+  '- Antes el orden cambiaba cada vez que llegaba un escaneo <b>nuevo</b>',
+  '```dart',
+  'final x = 1;',
+  '```',
+  '- Ahora es estable',
+].join('\n');
+
+function insertIdea(s: Setup, fields: { text: string; status: string; reason?: string; finishedAt?: number; createdAt?: number }) {
+  return Number(
+    s.db
+      .prepare(
+        `INSERT INTO requests (app_slug, user_id, text, status, branch, reason, created_at, finished_at) VALUES ('demo', 1, ?, ?, 'users/1', ?, ?, ?)`,
+      )
+      .run(fields.text, fields.status, fields.reason ?? null, fields.createdAt ?? 0, fields.finishedAt ?? null).lastInsertRowid,
+  );
+}
+
+test('AI summaries keep a safe markdown subset: no bold markers, code spans, one line per bullet, HTML escaped', () => {
+  assert.equal(
+    String(richText('**Qué corregí:**\n- Cambié `lib/ui/devices_screen.dart`\n* <b>x</b> & y\n\n## Fin')),
+    'Qué corregí:<br>Cambié <code>lib/ui/devices_screen.dart</code><br>&lt;b&gt;x&lt;/b&gt; &amp; y<br>Fin',
+  );
+  assert.equal(String(richText('Usa `<script>alert(1)</script>` y `a`b')), 'Usa <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> y <code>a</code>b');
+  assert.equal(String(richText('```dart\nfinal x = 1;\n```')), 'final x = 1;');
+});
+
+test('long AI summaries are clamped with a no-JS Show more toggle in the portal and the admin', async () => {
+  const s = await setup();
+  await login(s, OSVALDO, 'demo');
+  const long = insertIdea(s, { text: 'Ordenar los dispositivos por señal', status: 'built', reason: AI_SUMMARY, finishedAt: 1 });
+  insertIdea(s, { text: 'Mostrar la versión al final', status: 'built', reason: 'Ahora se ve la **versión** abajo.', finishedAt: 1, createdAt: 1 });
+  addBuild(s.db, { requestId: long, appSlug: 'demo', branch: 'users/1', versionCode: 5, apkFile: 'x.apk', commitSha: 'abc1234def' });
+
+  const { cookie } = await webLogin(s, OSVALDO);
+  const portal = (await s.server.inject({ method: 'GET', url: '/apks?app=demo', headers: { cookie } })).body;
+  assert.match(portal, /<code>lib\/ui\/devices_screen\.dart<\/code>/);
+  assert.match(portal, /&lt;b&gt;nuevo&lt;\/b&gt;/);
+  assert.doesNotMatch(portal, /\*\*|<b>nuevo/);
+  assert.match(portal, /<div class="note clamp"><p class="note-text">Qué corregí:<br>/);
+  assert.match(portal, /<details class="more-text"><summary><svg[^]*?<\/svg><span class="more">Show more<\/span><span class="less">Show less<\/span><\/summary><\/details>/);
+  // A short summary is shown whole, without a toggle.
+  assert.match(portal, /<div class="note"><p class="note-text">Ahora se ve la versión abajo\.<\/p><\/div>/);
+
+  const admin = await webLogin(s, ADMIN, '/admin');
+  const history = (await s.server.inject({ method: 'GET', url: '/admin?hist=all', headers: { cookie: admin.cookie } })).body;
+  assert.match(history, /<div class="note clamp"><p class="note-text">Qué corregí:<br>/);
+  assert.match(history, /<code>test\/devices_test\.dart<\/code>/);
+  assert.doesNotMatch(history, /\*\*/);
+});
+
+test('a built idea that only reached main shows "In the base version"; amber stays for your own version', async () => {
+  const s = await setup();
+  await login(s, OSVALDO, 'demo');
+  const mine = insertIdea(s, { text: 'Idea that reached my branch', status: 'built', createdAt: 2 });
+  const baseOnly = insertIdea(s, { text: 'Idea that only reached main', status: 'built', createdAt: 1 });
+  addBuild(s.db, { requestId: mine, appSlug: 'demo', branch: 'users/1', versionCode: 6, apkFile: 'a.apk', commitSha: 'aaaaaaa111' });
+  addBuild(s.db, { requestId: baseOnly, appSlug: 'demo', branch: 'main', versionCode: 4, apkFile: 'b.apk', commitSha: 'bbbbbbb222' });
+
+  const { cookie } = await webLogin(s, OSVALDO);
+  const portal = (await s.server.inject({ method: 'GET', url: '/apks?app=demo', headers: { cookie } })).body;
+  assert.match(portal, /<span class="node in" aria-hidden="true"><\/span>[^]*?<span class="pill-in">In your version 6<\/span>[^]*?Idea that reached my branch/);
+  assert.match(portal, /<span class="node trunk" aria-hidden="true"><\/span>[^]*?<span class="status trunk">In the base version<\/span>[^]*?Idea that only reached main/);
+  assert.equal(portal.match(/class="pill-in"/g)?.length, 1);
+  assert.doesNotMatch(portal, />Ready</);
+  assert.match(portal, /aria-current="false">Published<\/a>/);
+});
+
+test('admin history rows show when they finished: the time for today, the day otherwise', async () => {
+  const now = new Date(2026, 10, 20, 15, 30).getTime();
+  assert.match(fmtWhen(new Date(2026, 10, 20, 9, 5).getTime(), now), /^Nov 20, 2026, 9:05\sAM$/);
+  assert.equal(fmtWhen(new Date(2026, 10, 19, 23, 59).getTime(), now), 'Nov 19, 2026');
+  assert.equal(fmtWhen(null, now), '');
+
+  const s = await setup();
+  await login(s, OSVALDO, 'demo');
+  const finishedAt = Date.UTC(2026, 0, 15, 12);
+  insertIdea(s, { text: 'Idea finished in January', status: 'built', finishedAt });
+  const admin = await webLogin(s, ADMIN, '/admin');
+  const history = (await s.server.inject({ method: 'GET', url: '/admin?hist=all', headers: { cookie: admin.cookie } })).body;
+  assert.match(history, /by osvaldo\s*· <time datetime="2026-01-15T12:00:00\.000Z">Jan 15, 2026<\/time><\/span>/);
 });

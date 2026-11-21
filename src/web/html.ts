@@ -245,11 +245,24 @@ details.changes > summary { cursor:pointer; font-weight:600; }
 .timeline .node.in { background:var(--node); border-color:var(--node); }
 .timeline .node.off { border-color:var(--field); }
 .timeline .node.root { background:var(--fg); border-color:var(--fg); }
+.timeline .node.trunk { background:var(--fg); border-color:var(--fg); box-shadow:inset 0 0 0 3px var(--bg); }
 .timeline .meta { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:4px; }
 .timeline .when { font-size:.82rem; color:var(--muted); }
 .timeline .idea { margin:0; font-weight:600; }
 .timeline .off-text { color:var(--muted); }
-.timeline .note { margin:4px 0 0; color:var(--muted); font-size:.94rem; }
+.note { margin:4px 0 0; color:var(--muted); font-size:.92rem; }
+.timeline .note { font-size:.94rem; }
+.note-text { margin:0; overflow-wrap:anywhere; }
+.note-text code { font-size:.86em; padding:0 4px; border-radius:4px; color:var(--fg);
+  background:color-mix(in srgb, var(--fg) 7%, transparent); }
+.note.clamp:not(:has(> details[open])) > .note-text { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; }
+details.more-text > summary { cursor:pointer; list-style:none; display:inline-flex; align-items:center; gap:4px; min-height:32px;
+  font-size:.86rem; font-weight:600; color:var(--branch); }
+details.more-text > summary::-webkit-details-marker { display:none; }
+details.more-text > summary .icon { width:16px; height:16px; transition:transform .2s ease-out; }
+details.more-text[open] > summary .icon { transform:rotate(180deg); }
+details.more-text:not([open]) .less, details.more-text[open] .more { display:none; }
+@media (prefers-reduced-motion: reduce) { details.more-text > summary .icon { transition:none; } }
 .timeline .base { margin:0; color:var(--muted); font-size:.94rem; align-self:center; white-space:nowrap; }
 .pill-in { display:inline-block; font-size:.76rem; font-weight:700; line-height:1.4; color:#17231c; background:var(--node); border-radius:5px; padding:2px 7px; white-space:nowrap; }
 .icon { flex:none; }
@@ -340,7 +353,7 @@ export const USER_STATUS_LABEL: Record<string, string> = {
   rejected: 'Rejected',
   running: 'Being built',
   review: 'Owner is reviewing the code',
-  built: 'Ready',
+  built: 'In the base version',
   failed: 'Could not be published',
   discarded: 'Discarded',
 };
@@ -423,4 +436,35 @@ export function fmtDay(ms: number | null): string {
 export function fmtDate(ms: number | null): string {
   if (!ms) return '';
   return new Date(ms).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+export function fmtWhen(ms: number | null, now = Date.now()): string {
+  if (!ms) return '';
+  return new Date(ms).toDateString() === new Date(now).toDateString() ? fmtDate(ms) : fmtDay(ms);
+}
+
+function noteLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*```/.test(line))
+    .map((line) =>
+      line
+        .replace(/^\s*#{1,6}\s+/, '')
+        .replace(/^\s*[-*•]\s+/, '')
+        .replaceAll('**', '')
+        .trim(),
+    )
+    .filter(Boolean);
+}
+
+export function richText(text: string): Raw {
+  return raw(
+    noteLines(text)
+      .map((line) => esc(line).replace(/`([^`]+)`/g, '<code>$1</code>'))
+      .join('<br>'),
+  );
+}
+
+export function richTextRows(text: string, charsPerRow = 72): number {
+  return noteLines(text).reduce((rows, line) => rows + Math.max(1, Math.ceil(line.replaceAll('`', '').length / charsPerRow)), 0);
 }
